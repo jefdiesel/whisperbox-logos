@@ -3,7 +3,7 @@
 Status: accepted (desktop core 0.4.2). Recorded 2026-10-10.
 
 ## Context
-Frequencies (an event-organisation app on Loam) uses WhisperBox forms for booking requests,
+Freequencies (an event-organisation app on Loam; named Frequencies until 2026-10-12) uses WhisperBox forms for booking requests,
 crew sign-up, guest lists and feedback. Its phone app has to create forms and read answers
 with exactly the code WhisperBox runs: the mobile fold must stay byte-identical to the
 C++ fold, so a copied engine would be a fork of the data format. On the desktop nothing

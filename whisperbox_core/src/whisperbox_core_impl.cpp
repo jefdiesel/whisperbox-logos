@@ -1486,7 +1486,7 @@ std::string WhisperboxCoreImpl::setDeviceId(std::string deviceId) {
     return out.dump();
 }
 
-// One form at a glance, for a card in another app (Frequencies' night): title, status and
+// One form at a glance, for a card in another app (Freequencies' night): title, status and
 // counts. Answer counts only for the creator or a co-owner: a sealed answer doesn't say which
 // form it's for, so nobody else can count them. Receipts are public (form.confirmations).
 std::string WhisperboxCoreImpl::formSummary(std::string formId) {
