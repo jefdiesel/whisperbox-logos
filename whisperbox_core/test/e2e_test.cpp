@@ -21,6 +21,7 @@
 #include <fstream>
 #include <set>
 #include <filesystem>
+#include <QDateTime>
 #include <chrono>
 #include <pwd.h>
 #include <unistd.h>
@@ -740,6 +741,69 @@ int main(int argc, char** argv) {
         CHECK(keptId, "unreadable identity.json is moved aside, not overwritten");
         CHECK(K->snap()["identity"]["address"] != addrK, "a fresh identity is created next to the quarantined one");
         CHECK(!std::filesystem::exists(K->dir + "/events.json.tmp"), "no temp file left behind");
+    }
+
+    // ── review 2026-10-22: a hostile peer on the topic (auditor's WB-1/3/5/9/10/11 vectors) ──
+    std::printf("hostile peer:\n");
+    {
+        auto send = [&](const std::string& envText) { FakeBus::get().relay(C->node.get(), whisperbox::TOPIC, whisperbox::b64encode(envText)); };
+        auto diag = [&](Peer& p, const char* k) { return p.snap()["diagnostics"].value(k, 0L); };
+        long shape0 = diag(*A, "admDropShape"), bad0 = diag(*A, "rxBad"), fut0 = diag(*A, "admDropFuture");
+        const std::vector<std::string> frames = {
+            R"({"v":2,"t":"fp"})",
+            R"({"type":"RBSR","v":2,"t":"fp","from":"x"})",
+            R"({"type":"RBSR","v":2,"t":"ids","from":"x","ids":[1,2]})",
+            R"({"v":1,"type":"EVENT","event":{"type":1}})",
+            R"({"v":1,"type":"SYNC_REQ","from":1})",
+            R"({"v":1,"type":"EVENT","event":{"v":1,"id":"resp:x","type":"response.submit","hlc":1,"dev":"x","payload":{"encryptedPayload":"ab"}}})",
+            R"({"v":1,"type":"EVENT","event":{"v":1,"id":"form:x","type":"form.publish","hlc":{"wall":1,"ctr":0,"dev":"x"},"dev":"x","pub":null,"sig":null,"payload":{"id":"x","creator":"0x0"}}})",
+            R"({"v":1,"type":"EVENT","event":{"v":1,"id":"resp:bad","type":"response.submit","hlc":{"wall":1,"ctr":0,"dev":"x"},"dev":"x","payload":{"encryptedPayload":123}}})",
+            R"({"v":1,"type":"EVENT","event":{"v":1,"id":"form:bad","type":"form.publish","hlc":{"wall":1700000000000,"ctr":0,"dev":"d"},"dev":"d","payload":{"id":1,"creator":"0x1298004b9c5f01583a855dc3f693769b1289a762","questions":[]},"pub":"035b3c5cf5c588a6d32c969eef4ad575c5b49bc7004cf6bb7a28ade06a852267ed","sig":"43bd"}})",
+            R"({"v":1,"type":"EVENT","event":{"v":1,"id":"form:q","type":"form.publish","hlc":{"wall":1700000000000,"ctr":0,"dev":"d"},"dev":"d","payload":{"id":"q","creator":"0x1298004b9c5f01583a855dc3f693769b1289a762","questions":[1]},"pub":"035b","sig":"43bd"}})",
+            R"({"v":1,"type":"EVENT","event":{"v":1,"id":"resp:shadow","type":"response.submit","hlc":{"wall":1,"ctr":0,"dev":"x"},"dev":"x","payload":{"encryptedPayload":"00"}}})"};
+        for (const auto& f : frames) send(f);
+        pump(400);
+        CHECK(true, "A and B survive every malformed frame");   // an abort would have ended the run
+        CHECK(diag(*A, "admDropShape") > shape0, "malformed events are dropped at admission (" + std::to_string(diag(*A, "admDropShape") - shape0) + ")");
+        CHECK(diag(*A, "rxBad") > bad0, "malformed catch-up / SYNC_REQ frames are counted, not processed");
+        std::string onDisk; { std::ifstream f(A->dir + "/events.json"); onDisk.assign(std::istreambuf_iterator<char>(f), {}); }
+        CHECK(onDisk.find("resp:bad") == std::string::npos && onDisk.find("form:bad") == std::string::npos && onDisk.find("resp:shadow") == std::string::npos,
+              "nothing malformed reaches events.json (no poisoned restart)");
+        // a far-future clock is refused and never adopted (WB-3)
+        std::string farPayload = "00ff";
+        json far = {{"v", 1}, {"id", whisperbox::responseSubmitId(farPayload)}, {"type", "response.submit"}, {"hlc", {{"wall", 9999999999999LL}, {"ctr", 0}, {"dev", "x"}}},
+                    {"dev", "x"}, {"payload", {{"encryptedPayload", farPayload}}}};
+        send(json({{"v", 1}, {"type", "EVENT"}, {"event", far}}).dump());
+        pump(300);
+        CHECK(diag(*A, "admDropFuture") > fut0, "an event 300 years ahead is refused");
+        json nf = A->call(A->core->createForm(json({{"title", "clock"}, {"questions", json::array({{{"id", "q"}, {"type", "shortText"}, {"text", "x"}}})}}).dump()));
+        long long wall = nf["event"]["hlc"].value("wall", 0LL);
+        CHECK(wall > 0 && wall < (long long)QDateTime::currentMSecsSinceEpoch() + 10 * 60 * 1000, "A's own next event still carries real time");
+        // restart is clean
+        A->stop(); A->start();
+        CHECK(A->snap()["identity"]["address"] == addrA, "A restarts cleanly after the attack");
+        // a log poisoned by an older version heals on start (WB-1, persisted)
+        {
+            auto P = mkPeer("P"); P->node->online = false; P->stop();
+            json log = json::parse(std::ifstream(A->dir + "/events.json"));
+            log.push_back(json::parse(R"({"v":1,"id":"resp:bad","type":"response.submit","hlc":{"wall":1,"ctr":0,"dev":"x"},"dev":"x","payload":{"encryptedPayload":123}})"));
+            { std::ofstream o(P->dir + "/events.json", std::ios::trunc); o << log.dump(); }
+            P->start();
+            CHECK(P->snap()["diagnostics"].value("loadDropped", 0L) == 1, "a poisoned events.json starts: the bad event is skipped");
+            CHECK(std::filesystem::exists(P->dir + "/events.bad.json"), "...and kept aside in events.bad.json");
+            CHECK(!P->snap()["state"]["forms"].empty(), "...the good events load");
+        }
+        // answer tags are random, not derived from the public device id (WB-5)
+        json logA = json::parse(std::ifstream(A->dir + "/events.json"));
+        bool derived = false; int resp = 0;
+        for (const auto& e : logA) if (e.value("type", "") == "response.submit") { resp++; if (e.value("dev", "") == whisperbox::responseDevTag(devB, fid)) derived = true; }
+        CHECK(resp > 0 && !derived, "B's answer tag isn't sha256(deviceId|formId)");
+        // links that can't be valid are refused (WB-10, review F4/F5)
+        CHECK(!A->call(A->core->joinForm("whisperbox://form?id=../../etc&by=0xnothex")).value("ok", true), "a link with a bad id and creator is refused");
+        CHECK(!A->call(A->core->joinForm("../../etc")).value("ok", true), "...a bare id that can't be one too");
+        CHECK(!A->call(A->core->importForm("whisperbox://form?id=%")).value("ok", true), "...and a malformed escape");
+        json jl = A->call(A->core->joinForm("whisperbox://form?id=" + fid + "&by=" + addrA));
+        CHECK(jl.value("ok", false) && jl.value("formId", "") == fid, "joinForm with a link returns the form id, not the link");
     }
 
     std::printf("\n%d/%d checks passed\n", checks - failures, checks);

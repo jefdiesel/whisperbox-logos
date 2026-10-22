@@ -24,6 +24,7 @@
 //  - All address comparisons are case-insensitive (lowercased).
 //  - No randomness, no wall-clock reads, no iteration over unordered structures.
 #include <string>
+#include <limits>
 #include <vector>
 #include <map>
 #include <set>
@@ -158,13 +159,18 @@ struct Clock {
         if (nowMs > wall) { wall = nowMs; ctr = 0; } else { ctr += 1; }
         return json({{"wall", wall}, {"ctr", ctr}, {"dev", dev}});
     }
-    void receive(const json& h) {
-        long long hw = h.value("wall", 0LL), hc = h.value("ctr", 0LL);
+    // maxWall: a remote clock this far ahead is ignored, not adopted - one far-future event used to
+    // move every later local stamp to the year 2286, persisted (review 2026-10-22, WB-3).
+    void receive(const json& h, long long maxWall = std::numeric_limits<long long>::max()) {
+        if (!h.is_object() || !h.contains("wall") || !h["wall"].is_number_integer()) return;
+        long long hw = h["wall"].get<long long>();
+        long long hc = h.contains("ctr") && h["ctr"].is_number_integer() ? h["ctr"].get<long long>() : 0;
+        if (hw > maxWall) return;
         if (hw > wall) { wall = hw; ctr = hc; }
         else if (hw == wall) { ctr = std::max(ctr, hc); }
     }
-    void primeFrom(const std::vector<json>& log) {
-        for (const auto& e : log) receive(e.value("hlc", json::object()));
+    void primeFrom(const std::vector<json>& log, long long maxWall = std::numeric_limits<long long>::max()) {
+        for (const auto& e : log) if (e.is_object() && e.contains("hlc")) receive(e["hlc"], maxWall);
     }
 };
 
@@ -761,5 +767,97 @@ inline std::string responseConfirmBatchId(const std::string& formId, std::vector
     std::string j; for (size_t i = 0; i < ids.size(); i++) { if (i) j += ","; j += ids[i]; }
     return "confirm:" + lc(formId) + ":b:" + toHex(sha256(Bytes(j.begin(), j.end()))).substr(0, 16);
 }
+
+// ── Shape validation (review 2026-10-22, WB-1/WB-9/WB-11) ───────────────────────
+// Everything from the network is untrusted JSON. One wrongly-typed field used to throw out of the
+// fold (nlohmann value() on a number), and the event was saved first, so the node crashed on every
+// start. Admission and load both run this; anything that fails is dropped, never folded.
+inline bool jStr(const json& o, const char* k, size_t maxLen = 4096, bool required = true) {
+    if (!o.contains(k)) return !required;
+    return o[k].is_string() && o[k].get_ref<const std::string&>().size() <= maxLen && (!required || !o[k].get_ref<const std::string&>().empty());
+}
+inline bool jOptStr(const json& o, const char* k, size_t maxLen = 65536) { return !o.contains(k) || o[k].is_null() || (o[k].is_string() && o[k].get_ref<const std::string&>().size() <= maxLen); }
+inline bool jOptBool(const json& o, const char* k) { return !o.contains(k) || o[k].is_null() || o[k].is_boolean(); }
+inline bool jOptNum(const json& o, const char* k) { return !o.contains(k) || o[k].is_null() || o[k].is_number(); }
+inline bool wellFormedQuestion(const json& q) {
+    if (!q.is_object() || !jStr(q, "id", 128) || !jStr(q, "type", 64)) return false;
+    if (!jOptStr(q, "text") || !jOptStr(q, "help") || !jOptStr(q, "minLabel", 512) || !jOptStr(q, "maxLabel", 512) || !jOptStr(q, "style", 32)) return false;
+    if (!jOptBool(q, "required") || !jOptBool(q, "allowOther") || !jOptBool(q, "shuffleOptions") || !jOptNum(q, "min") || !jOptNum(q, "max")) return false;
+    if (q.contains("options") && !q["options"].is_null()) {
+        if (!q["options"].is_array() || q["options"].size() > 500) return false;
+        for (const auto& o : q["options"]) if (!o.is_string() || o.get_ref<const std::string&>().size() > 4096) return false;
+    }
+    return true;
+}
+// The editable fields of a form (form.publish payload / form.update payload.form).
+inline bool wellFormedFormFields(const json& f) {
+    if (!f.is_object()) return false;
+    if (f.contains("questions") && !f["questions"].is_null()) {
+        if (!f["questions"].is_array() || f["questions"].size() > 500) return false;
+        for (const auto& q : f["questions"]) if (!wellFormedQuestion(q)) return false;
+    }
+    if (!jOptStr(f, "title") || !jOptStr(f, "description") || !jOptStr(f, "thankYou") || !jOptStr(f, "quizKey", 4096)) return false;
+    if (!jOptNum(f, "expiresAt") || !jOptNum(f, "maxResponses") || !jOptNum(f, "editWindowMinutes") || !jOptNum(f, "createdAt")) return false;
+    for (const char* b : {"showResponseCount", "shuffleQuestions", "anonymous", "allowEdits"}) if (!jOptBool(f, b)) return false;
+    if (f.contains("whitelist") && !f["whitelist"].is_null()) {
+        const json& w = f["whitelist"];
+        if (!w.is_object() || !jOptStr(w, "type", 32) || !jOptStr(w, "value", 1 << 20)) return false;
+    }
+    return true;
+}
+// A catch-up (RBSR) message before logos_sync::catchup::respond, which indexes into it unchecked.
+inline bool wellFormedCatchup(const json& m) {
+    if (!m.is_object() || !jStr(m, "t", 16) || !jOptStr(m, "from", 256) || !jOptStr(m, "lo", 512) || !jOptStr(m, "hi", 512)) return false;
+    auto strArray = [](const json& a, size_t max) {
+        if (!a.is_array() || a.size() > max) return false;
+        for (const auto& x : a) if (!x.is_string() || x.get_ref<const std::string&>().size() > 512) return false;
+        return true;
+    };
+    const std::string& t = m["t"].get_ref<const std::string&>();
+    if (t == "fp") {
+        if (!m.contains("fps") || !m.contains("bounds") || !strArray(m["fps"], 64) || !strArray(m["bounds"], 64)) return false;
+        return !m["fps"].empty() && m["bounds"].size() + 1 == m["fps"].size();
+    }
+    if (t == "ids" || t == "need") return m.contains("ids") && strArray(m["ids"], 5000);
+    return false;
+}
+// How far ahead of our clock a peer's event may be (clock skew allowance).
+inline constexpr long long kMaxClockLeadMs = 5 * 60 * 1000;
+inline bool wellFormedEvent(const json& e) {
+    if (!e.is_object() || !jStr(e, "id", 512) || !jStr(e, "type", 64)) return false;
+    if (e.contains("v") && !e["v"].is_number_integer()) return false;
+    if (!jOptStr(e, "dev", 256) || !jOptStr(e, "pub", 256) || !jOptStr(e, "sig", 512)) return false;
+    if (!e.contains("hlc") || !e["hlc"].is_object()) return false;
+    const json& h = e["hlc"];
+    if (!h.contains("wall") || !h["wall"].is_number_integer() || h["wall"].get<long long>() < 0) return false;
+    if (!h.contains("ctr") || !h["ctr"].is_number_integer() || h["ctr"].get<long long>() < 0) return false;
+    if (!jOptStr(h, "dev", 256)) return false;
+    if (!e.contains("payload") || !e["payload"].is_object()) return false;
+    const json& p = e["payload"];
+    const std::string& t = e["type"].get_ref<const std::string&>();
+    if (t == RESPONSE_SUBMIT) {
+        if (!jStr(p, "encryptedPayload", 4 << 20)) return false;
+        return e["id"].get_ref<const std::string&>() == responseSubmitId(p["encryptedPayload"].get_ref<const std::string&>());   // WB-11
+    }
+    if (t == FORM_PUBLISH)
+        return jStr(p, "id", 128) && jStr(p, "creator", 64) && jOptStr(p, "publicKey", 256) && wellFormedFormFields(p)
+            && e["id"].get_ref<const std::string&>() == formPublishId(p["id"].get_ref<const std::string&>());
+    // every other event names its form and its (signing) author
+    if (!jStr(p, "formId", 128) || !jStr(p, "author", 64)) return false;
+    if (t == RESPONSE_CONFIRM) {
+        if (p.contains("confirmationIds")) {
+            if (!p["confirmationIds"].is_array() || p["confirmationIds"].size() > 1000) return false;
+            for (const auto& c : p["confirmationIds"]) if (!c.is_string() || c.get_ref<const std::string&>().size() > 128) return false;
+            return true;
+        }
+        return jStr(p, "confirmationId", 128);
+    }
+    if (t == FORM_UPDATE) return p.contains("form") && wellFormedFormFields(p["form"]);
+    if (t == FORM_COOWNER) return jStr(p, "owner", 64) && jStr(p, "sealedKey", 4096);
+    if (t == RESPONSE_REPLY) return jStr(p, "to", 128) && jStr(p, "sealed", 1 << 20);
+    if (t == FORM_CLOSE) return jOptNum(p, "expiresAt");
+    return t == FORM_REOPEN;
+}
+
 
 } // namespace whisperbox

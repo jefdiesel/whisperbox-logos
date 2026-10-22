@@ -140,6 +140,7 @@ private:
     // diagnostic counters (surfaced in snapshot, per logos-distributed-debugging)
     long m_rxRaw = 0, m_rxSeen = 0, m_rxNew = 0, m_rxDup = 0, m_txTotal = 0;
     long m_admDropSig = 0, m_admDropType = 0;
+    long m_admDropShape = 0, m_admDropFuture = 0, m_rxBad = 0, m_loadDropped = 0;   // review 2026-10-22 (WB-1/WB-3)
 
     int64_t m_lastSyncReserveMs = 0;      // SYNC_REQ-driven re-serve throttle (3s)
     int64_t m_lastSeedMs = 0;             // periodic seed throttle (60s)

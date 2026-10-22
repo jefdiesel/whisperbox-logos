@@ -17,3 +17,9 @@ person and receipts.
 ## Consequences
 - The creator can't tell two anonymous answers from the same person on different forms.
 - Anonymity is against the creator, not against network-level observers (timing, IPs).
+
+## Update 2026-10-22 (review WB-5, WB-2)
+
+"Unlinkable across forms" did not hold before 0.4.3: the answer's dev tag was derived from the
+device id, which is public (see ADR 0003's update). Fixed with a random tag. Anonymous answers are
+unlinkable, not unique: a member can generate identities and answer more than once.

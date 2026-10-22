@@ -17,3 +17,9 @@ already acted on an answer (receipt sent) must not see it change.
 ## Consequences
 - "Send receipt" doubles as "lock this answer".
 - Window and receipt ordering are by HLC (same caveat as ADR 0008).
+
+## Update 2026-10-22 (review WB-2)
+
+The inner signature protects editable forms only. On an ordinary form an answer is unsigned, so a
+member can send one in another respondent's name with an earlier HLC, and it wins (the earliest
+answer per respondent counts). Open: sign every answer, or say so in the creator's view.

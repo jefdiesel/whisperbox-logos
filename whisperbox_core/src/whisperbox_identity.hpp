@@ -236,8 +236,14 @@ inline bool verifyEvent(const Event& e) {
 }
 
 // JSON-based convenience (the module layer passes events as nlohmann json).
-// Never throws.
-inline bool verifyEventJson(const json& e) {
+// Never throws: wrongly-typed fields (a remote peer's choice) mean "not verified".
+inline bool verifyEventJson(const json& e) try {
+    if (!e.is_object()) return false;
+    for (const char* k : {"id", "type", "dev", "pub", "sig"}) if (e.contains(k) && !e[k].is_null() && !e[k].is_string()) return false;
+    if (e.contains("v") && !e["v"].is_number_integer()) return false;
+    if (e.contains("hlc") && !e["hlc"].is_object()) return false;
+    if (e.contains("hlc") && ((e["hlc"].contains("wall") && !e["hlc"]["wall"].is_number_integer()) || (e["hlc"].contains("ctr") && !e["hlc"]["ctr"].is_number_integer())
+                              || (e["hlc"].contains("dev") && !e["hlc"]["dev"].is_string()))) return false;
     Event ev;
     ev.v = e.value("v", 1);
     ev.id = e.value("id", "");
@@ -249,10 +255,10 @@ inline bool verifyEventJson(const json& e) {
     }
     ev.dev = e.value("dev", "");
     if (e.contains("payload") && e["payload"].is_object()) ev.payload = e["payload"];
-    ev.pub = e.value("pub", "");   // null/absent → "" (unsigned)
-    ev.sig = e.value("sig", "");
+    ev.pub = e.contains("pub") && e["pub"].is_string() ? e["pub"].get<std::string>() : "";   // null/absent → "" (unsigned)
+    ev.sig = e.contains("sig") && e["sig"].is_string() ? e["sig"].get<std::string>() : "";
     return verifyEvent(ev);
-}
+} catch (...) { return false; }
 
 // JSON-based signing (the module layer passes events as nlohmann json):
 // adds pub/sig to the envelope in place. Never throws for a valid identity.

@@ -210,7 +210,7 @@ footer p { margin: 0; max-width: 70ch; }
     <div class="copy-col">
       <span class="label">Encrypted forms for Logos Basecamp</span>
       <h1>Ask in public. <em>Read in private.</em></h1>
-      <p class="lede">Publish a form and share its link or QR code. Each answer is sealed on the respondent's own device to your key, so the network carries only noise and only you can open it. There's no server, and no account to sign up for.</p>
+      <p class="lede">Publish a form and share its link or QR code. Each answer is sealed on the respondent's own device to your key, so the network carries only noise and only you (and co-owners you add) can open it. There's no server, and no account to sign up for.</p>
     </div>
     <svg class="whisper" viewBox="0 0 300 230" role="img" aria-label="Two people whispering. One says: psst, have you heard? The other: heard what?">
       <g class="lean">
@@ -309,15 +309,15 @@ footer p { margin: 0; max-width: 70ch; }
     <ol class="steps">
       <li>
         <h3>You publish a form</h3>
-        <p>The title, questions and your public key go out signed with your identity. Anyone with the link can load it; nobody can change it.</p>
+        <p>The title, questions and your public key go out signed with your identity. Anyone with the link can load it; only you can change it.</p>
       </li>
       <li>
         <h3>Respondents seal their answers</h3>
-        <p>Their app encrypts the whole response, including who sent it, to your key before it leaves the device. One response per person.</p>
+        <p>Their app encrypts the whole response, including who sent it, to your key before it leaves the device. Each identity answers once.</p>
       </li>
       <li>
         <h3>You open, confirm, export</h3>
-        <p>Your device decrypts the pool, sends each respondent a receipt, and exports a CSV. The receipt carries a random id only the respondent recognises.</p>
+        <p>Your device decrypts the pool, sends each respondent a receipt, and exports a CSV. The receipt carries a random id: the respondent recognises it, nobody else on the network can tell whose answer it confirms.</p>
       </li>
     </ol>
     <p class="sub">Also in the box: anonymous forms (even you don't learn who answered), members-only forms, co-owners who can read the answers too, quizzes with privately sent scores, private replies, answer edits for a set window, response caps, closing dates, drafts and scheduled publishing. On Android, your form keys can live on a Status Keycard.</p>
@@ -333,13 +333,15 @@ footer p { margin: 0; max-width: 70ch; }
         <tbody>
           <tr><td>Form title and questions</td><td><span class="pill pub">public</span></td><td>Anyone on the topic</td></tr>
           <tr><td>Who may answer</td><td><span class="pill pub">public</span></td><td>Anyone; restricted forms list the allowed addresses</td></tr>
-          <tr><td>The answers</td><td><span class="pill sealed">sealed</span></td><td>Only the form's creator</td></tr>
-          <tr><td>Who answered</td><td><span class="pill sealed">sealed</span></td><td>Only the form's creator; on an anonymous form, nobody</td></tr>
+          <tr><td>The answers</td><td><span class="pill sealed">sealed</span></td><td>The form's creator and its co-owners</td></tr>
+          <tr><td>Who answered</td><td><span class="pill sealed">sealed</span></td><td>The creator and co-owners; on an anonymous form, nobody</td></tr>
           <tr><td>That a response was sent, and from which network node</td><td><span class="pill pub">visible</span></td><td>The network nodes that relay it (there's no mixnet in this path)</td></tr>
-          <tr><td>Receipt</td><td><span class="pill pub">public</span></td><td>Anyone sees it was sent; only the respondent can tell it's theirs</td></tr>
+          <tr><td>How long an answer is, and when it was sent</td><td><span class="pill pub">visible</span></td><td>Anyone on the topic (answers aren't padded)</td></tr>
+          <tr><td>Receipt</td><td><span class="pill pub">public</span></td><td>Anyone sees it was sent; only the respondent and the form's owners can match it to an answer</td></tr>
         </tbody>
       </table>
     </div>
+    <p class="note"><strong>Limits today.</strong> On a form open to anyone, answers aren't tied to a verified person: someone determined can send several, or send one in another person's name, and an answer can claim an earlier time than it was sent, which a close date or a response cap trusts. Members-only forms check each answer's signature. A co-owner's access can't be taken back. There is no forward secrecy: whoever gets a form's key reads all of its answers.</p>
     <p class="note">The network's store nodes keep sealed blobs so new devices can catch up. Without the form key they are useless; that's the trade for having no server. On your own computer, your key, your forms and your answers are stored unencrypted in a folder only your user account can read.</p>
   </section>
 

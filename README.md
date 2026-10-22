@@ -2,7 +2,7 @@
 
 **WhisperBox rebuilt as a local-first, end-to-end-encrypted Logos Basecamp app.**
 Privacy-first forms and surveys: the researcher publishes a form, respondents submit
-answers that are **E2E-encrypted to the form key** (only the creator can decrypt),
+answers that are **E2E-encrypted to the form key** (only the creator and co-owners can decrypt),
 and everything syncs peer-to-peer over **Logos Messaging** (one shared topic, plain relay, with
 WhisperBox's own set-reconciliation catch-up) - no server, no central storage of readable data.
 
@@ -31,7 +31,7 @@ module wrapper) libraries. Template: [qaku-logos](https://github.com/vpavlin/qak
 | event | who | notes |
 |---|---|---|
 | `form.publish` | creator | public form definition, signed; sealing key = the form's own key |
-| `response.submit` | respondent | the WHOLE answer ECIES-sealed to the form key; no identity on the wire |
+| `response.submit` | respondent | the WHOLE answer ECIES-sealed to the form key; no address on the wire, a random tag per answer |
 | `response.confirm` | creator / co-owner | receipt: echoes a random id the respondent sealed (single or batch) |
 | `form.close` / `form.reopen` | creator | closed periods are remembered; answers sealed while closed never count |
 | `form.update` | creator | edit a published form (latest wins, question ids stable) |
@@ -69,9 +69,11 @@ Build: see [docs/BUILD.md](docs/BUILD.md#5-android-apk) (arm64 only; release sig
 ## Privacy model
 - Form definitions (title, questions, who may answer) are public on the topic.
 - A response is ECIES-sealed to the form creator's key; on the wire and in the
-  fleet store it is an opaque blob with no respondent identity.
+  fleet store it is an opaque blob with no respondent address; its tag is random per answer (0.4.3:
+  it used to be derived from the device id, which linked a device's answers - see below).
 - The creator's receipt carries a random id the respondent sealed inside its
-  response, so a receipt can't be linked to an address.
+  response, so other people can't link a receipt to an address (the form's owners can: they hold
+  the answer).
 - Share links name the creator; a client never seals answers to a form whose
   creator differs from the link, or to a form id two people published.
 - "Only listed addresses" forms: respondents sign inside the sealed payload;
@@ -79,6 +81,11 @@ Build: see [docs/BUILD.md](docs/BUILD.md#5-android-apk) (arm64 only; release sig
 - Delta vs. the original whisperbox: the network's store nodes keep the sealed messages
   (that's how late joiners catch up). Sealed bytes are useless without the form key; form
   metadata was public by design.
+- **Limits today (review 2026-10-22):** on forms open to anyone, a response isn't authenticated:
+  a member can send several, send one in another respondent's name, or stamp it earlier than it was
+  sent, which close dates, caps and receipts trust. "Only listed addresses" forms check a signature
+  inside the sealed answer. Co-owner access can't be revoked, and there's no forward secrecy.
+  Answer length and timing are visible.
 - **What sealing does not hide:** the network nodes that relay a response see which node sent
   it and when (there's no mixnet in this path). The creator can't tell who answered an
   anonymous form, but a well-placed network observer could still link a response to a

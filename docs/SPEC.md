@@ -40,7 +40,7 @@ All keys are secp256k1. Public keys are 33-byte compressed (`pub33`), written as
 | anonymous identity | first valid scalar of `HKDF-SHA256(identityPriv, salt="whisperbox-anon-v1", info=utf8(lc(formId)) [+ "#" + i])` |
 | reply key | first valid scalar of `HKDF-SHA256(identityPriv, salt="whisperbox-reply-v1", info=utf8(lc(formId) + "\|" + confirmationId) [+ "#" + i])` |
 | device id | random per install; stamps HLCs and (non-response) events |
-| response dev tag | `"wb-" + hex(sha256(utf8(deviceId + "\|" + lc(formId))))[0..12]` |
+| response dev tag | `"wb-" + hex(6 random bytes)`, fresh for every answer (0.4.3). Before: `"wb-" + hex(sha256(utf8(deviceId + "\|" + lc(formId))))[0..12]` - linkable, since every signed event carries the device id in clear (review 2026-10-22, WB-5) |
 
 "First valid scalar": retry with `i = 1..7` while the HKDF output is 0 or >= n. Legacy forms
 (before 0.3) used the identity key itself as the form key (`form.publicKey == identity pub`);
@@ -109,7 +109,7 @@ HLC (loam-sync): `send(now)`: if `now > wall` then `wall = now, ctr = 0` else `c
 | `response.reply` | `reply:<formId>:<to>:<nonce>` | yes | `{formId, author, to: <receipt id>, sealed}` |
 
 `formId` in payloads and ids is lower-case. Nonces are 6 random bytes hex.
-`response.submit` events carry the per-form dev tag (section 2) in both `dev` and `hlc.dev`,
+`response.submit` events carry the random answer tag (section 2) in both `dev` and `hlc.dev`,
 never the real device id.
 
 ### 4.3 Form definition (`form.publish` payload)
@@ -200,8 +200,19 @@ Before merging a received event:
 - `form.publish`: MUST verify (section 3.2, signer == `payload.creator`).
 - creator-gated types: MUST verify (signer == `payload.author`). Whether the author may do
   it is decided later, in the fold.
-- `response.submit`: MUST NOT carry `pub`; MUST have `payload.encryptedPayload`.
+- `response.submit`: MUST NOT carry `pub`; MUST have `payload.encryptedPayload`; its `id` MUST be
+  `resp:` + the hash of that payload (section 4.2), else a copy could shadow a real answer.
 - anything else: dropped.
+
+From 0.4.3 (review 2026-10-22), before any of the above, every event MUST be well formed or it is
+dropped (`wellFormedEvent`, the same rules in `whisperbox_core` and `packages/client`): string
+`id`/`type`, `hlc` with non-negative integer `wall`/`ctr`, an object `payload`, and each type's
+payload fields with their JSON types (form definitions: an array of question objects with string
+`id`/`type`, typed options and flags). An event whose `hlc.wall` is more than 5 minutes ahead of
+the receiver's clock is dropped, and a clock is never moved forward by such an event. Catch-up
+messages are checked the same way before they are answered. Loading a log applies the same rules:
+an event that fails is skipped and kept in `events.bad.json`. Nothing a peer sends may stop the
+node: a frame that fails to process is counted (`rxBad`) and dropped.
 
 ## 7. Merge
 
@@ -380,13 +391,22 @@ On the wire and in fleet stores:
 Linkability:
 - receipts and replies use the respondent-chosen random `confirmationId`, which can't be
   derived from the address;
-- `response.submit` carries a per-form dev tag, so answers to different forms can't be
-  linked by device;
+- `response.submit` carries a fresh random tag (0.4.3); the derived per-form tag it replaced
+  linked a device's answers across forms for anyone who knew its device id, and every signed
+  event published that (review WB-5);
 - anonymous forms: the respondent address is a per-form derived identity, unlinkable to the
-  real address and across forms (still one answer per person per form).
+  real address and across forms.
 
-Not protected: timing/network-level correlation; the creator (and co-owners) see everything
-in an answer; a co-owner keeps access forever.
+Not authenticated on forms open to anyone (review 2026-10-22, WB-2, open): `response.submit` is
+unsigned and its HLC is chosen by the sender. A member can send several answers (one per
+identity they generate), send one claiming another respondent's address (the earliest HLC per
+respondent wins), and stamp an answer before a close, an expiry or a receipt, or fill
+`maxResponses`, since those compare the answer's own HLC. "Only listed addresses" forms check the
+inner signature.
+
+Not protected: timing/network-level correlation; answer length (answers aren't padded); the
+creator (and co-owners) see everything in an answer; a co-owner keeps access forever; there is
+no forward secrecy (a leaked form key opens all of that form's answers).
 
 ## 15. Conformance fixtures
 

@@ -24,3 +24,11 @@ The original whisperbox sealed the whole answer to the creator. Anything visible
 - Every creator check is deterministic over the HLC-ordered pool, so co-owners and the
   creator's other devices compute the same accepted set.
 - Creator decryption costs one trial open per (new blob x own form) on first sight.
+
+## Update 2026-10-22 (review WB-5)
+
+The per-form dev tag was `sha256(deviceId|formId)`. Every signed event carries the device id in
+clear, so anyone who knew a user's device id could compute their tag for any form and link their
+answers, including on anonymous forms. From 0.4.3 the tag is 6 random bytes, fresh for every
+answer. Also from 0.4.3: a `response.submit` id must be the hash of its payload, so a copy with a
+different payload can't shadow a real answer.

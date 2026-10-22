@@ -166,7 +166,7 @@ void WhisperboxCoreImpl::onContextReady() {
     m_clock = whisperbox::Clock(m_deviceId);
     loadLog();
     fprintf(stderr, "WHISPERBOX log events=%zu\n", m_log.size());
-    m_clock.primeFrom(m_log);
+    m_clock.primeFrom(m_log, nowMs() + whisperbox::kMaxClockLeadMs);
     loadWatched();
     loadMySubmissions();
     loadLocalPrefs();
@@ -314,7 +314,17 @@ void WhisperboxCoreImpl::loadLog() {
     if (!f) return;
     try {
         json a = json::parse(std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()));
-        if (a.is_array()) for (auto& e : a) if (e.is_object() && e.contains("id")) m_log.push_back(e);
+        json bad = json::array();
+        if (a.is_array()) for (auto& e : a) {
+            if (whisperbox::wellFormedEvent(e)) m_log.push_back(e);
+            else { bad.push_back(e); m_loadDropped++; }
+        }
+        // A log written before 0.4.3 may hold a peer's malformed event that crashed every start
+        // (WB-1): skip it, and keep it aside rather than losing it.
+        if (!bad.empty()) {
+            fprintf(stderr, "WHISPERBOX skipped %zu malformed events in events.json (kept in events.bad.json)\n", bad.size());
+            writeAtomic(m_dataDir + "/events.bad.json", bad.dump());
+        }
     } catch (...) {
         // Never let the next save overwrite it: keep the unreadable file for recovery.
         f.close();
@@ -336,6 +346,7 @@ void WhisperboxCoreImpl::loadLog() {
     bool changed = repaired.size() != before || json(repaired).dump() != json(m_log).dump();
     m_log = std::move(repaired);
     if (changed) { fprintf(stderr, "WHISPERBOX log repaired %zu -> %zu events\n", before, m_log.size()); saveLog(); }
+    else if (m_loadDropped) saveLog();   // the malformed events are in events.bad.json now
 }
 void WhisperboxCoreImpl::saveLog() {
     writeAtomic(m_dataDir + "/events.json", json(m_log).dump());
@@ -589,7 +600,7 @@ void WhisperboxCoreImpl::broadcastEvent(const json& e) {
 }
 
 // ── ingest (receive path) ────────────────────────────────────────────────────────
-void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channelPath) {
+void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channelPath) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     m_rxRaw++;
     if (channelPath) m_rxSeen++;
@@ -597,9 +608,10 @@ void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channe
     // double-peel first, then a single peel (qaku convention).
     auto tryText = [this](const std::string& t) -> bool {
         json env = whisperbox::parseEnvelope(t);
-        if (!env.is_object()) return false;
+        if (!env.is_object() || !env.contains("type") || !env["type"].is_string()) return false;
         const std::string type = env["type"].get<std::string>();
         if (type == "RBSR") {
+            if (!whisperbox::wellFormedCatchup(env)) { m_rxBad++; return true; }
             std::vector<logos_sync::Event> evs; evs.reserve(m_log.size());
             std::map<std::string, const json*> byId;
             for (const auto& e : m_log) {
@@ -616,6 +628,7 @@ void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channe
             // Flagged rbsr = a peer that reconciles via RBSR; re-serving the whole log too
             // would be pure flood. Unflagged = a 0.1.x peer that only knows SYNC_REQ.
             if (env.contains("rbsr")) return true;
+            if (!env.contains("from") || !env["from"].is_string()) { m_rxBad++; return true; }
             if (env.value("from", "") != m_deviceId && nowMs() - m_lastSyncReserveMs >= 3000) {
                 m_lastSyncReserveMs = nowMs();
                 m_legacyReseeds++;
@@ -629,7 +642,7 @@ void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channe
             bool isNew = whisperbox::mergeOne(m_log, e);
             if (isNew) {
                 m_rxNew++;
-                m_clock.receive(e.value("hlc", json::object()));
+                m_clock.receive(e["hlc"], nowMs() + whisperbox::kMaxClockLeadMs);
                 saveLog();
                 publishState();
             } else m_rxDup++;
@@ -641,10 +654,22 @@ void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channe
     if (tryText(whisperbox::b64decode(once))) return;   // double peel
     if (tryText(once)) return;                           // single peel
     if (channelPath) fprintf(stderr, "WHISPERBOXRX ingest OPENFAIL plen=%zu\n", text.size());
+} catch (const std::exception& ex) {
+    // Nothing a peer sends may take the node down (review 2026-10-22, WB-1).
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    m_rxBad++;
+    fprintf(stderr, "WHISPERBOXRX dropped a frame that failed to process: %s\n", ex.what());
+} catch (...) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    m_rxBad++;
 }
 
 // Admission gates at merge (PLAN 3.4): drop violators, counted, not fatal.
 bool WhisperboxCoreImpl::admitEvent(const json& e) {
+    // Shape first: a wrongly-typed field must never reach the fold (WB-1/WB-9/WB-11).
+    if (!whisperbox::wellFormedEvent(e)) { m_admDropShape++; return false; }
+    // A peer's clock may lead ours by a few minutes, not by centuries (WB-3).
+    if (e["hlc"]["wall"].get<long long>() > nowMs() + whisperbox::kMaxClockLeadMs) { m_admDropFuture++; return false; }
     const std::string type = e.value("type", "");
     if (type == FORM_PUBLISH) {
         // Creator-gated by signature: must verify AND the recovered address must be
@@ -660,7 +685,7 @@ bool WhisperboxCoreImpl::admitEvent(const json& e) {
     if (type == RESPONSE_SUBMIT) {
         // OPAQUE: an event-level pub/sig here would leak the respondent's identity —
         // reject such events outright (privacy invariant).
-        if (e.contains("pub") && !e["pub"].is_null() && !e["pub"].get<std::string>().empty()) { m_admDropSig++; return false; }
+        if (e.contains("pub") && e["pub"].is_string() && !e["pub"].get<std::string>().empty()) { m_admDropSig++; return false; }
         if (!e.contains("payload") || !e["payload"].contains("encryptedPayload")) { m_admDropType++; return false; }
         return true;
     }
@@ -794,7 +819,7 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     snap["mySubmissions"] = subArr;
     snap["diagnostics"] = json({
         {"rxRaw", m_rxRaw}, {"rxSeen", m_rxSeen}, {"rxNew", m_rxNew}, {"rxDup", m_rxDup},
-        {"txTotal", m_txTotal}, {"admDropSig", m_admDropSig}, {"admDropType", m_admDropType},
+        {"txTotal", m_txTotal}, {"admDropSig", m_admDropSig}, {"admDropType", m_admDropType}, {"admDropShape", m_admDropShape}, {"admDropFuture", m_admDropFuture}, {"rxBad", m_rxBad}, {"loadDropped", m_loadDropped},
         {"rbsrRx", m_rbsrRx}, {"legacyReseeds", m_legacyReseeds},
     });
     return snap;
@@ -898,9 +923,12 @@ void WhisperboxCoreImpl::enrichResponses(const OrderedJson& state, const std::st
         }
     }
 }
+// "" = not sent: the reply key came from the respondent and may not be a curve point (WB-8).
 std::string WhisperboxCoreImpl::sendReply(const std::string& formId, const std::string& cid, const std::string& replyPub, const json& body) {
     const std::string pt = body.dump();
-    const std::string sealed = whisperbox::toHex(whisperbox::eciesSeal(whisperbox::fromHex(replyPub), whisperbox::Bytes(pt.begin(), pt.end())));
+    std::string sealed;
+    try { sealed = whisperbox::toHex(whisperbox::eciesSeal(whisperbox::fromHex(replyPub), whisperbox::Bytes(pt.begin(), pt.end()))); }
+    catch (...) { return ""; }
     OrderedJson p = OrderedJson::object();
     p["formId"] = formId; p["author"] = m_signId.address; p["to"] = cid; p["sealed"] = sealed;
     json ev = buildEvent(whisperbox::RESPONSE_REPLY, "reply:" + formId + ":" + cid + ":" + randomHex(6), p, /*sign=*/true);
@@ -924,7 +952,9 @@ std::string WhisperboxCoreImpl::replyToResponse(std::string formId, std::string 
         for (const auto& r : cv["responses"][formId])
             if (confirmIdOf(json::parse(r.dump()), formId) == confirmationId) { replyPub = r.value("replyPub", ""); break; }
     if (replyPub.empty()) { out["ok"] = false; out["error"] = "that answer can't receive replies (sent by an older WhisperBox)"; return out.dump(); }
-    sendReply(formId, confirmationId, replyPub, json({{"message", trim(message)}, {"from", m_signId.address}, {"at", nowMs()}}));
+    if (sendReply(formId, confirmationId, replyPub, json({{"message", trim(message)}, {"from", m_signId.address}, {"at", nowMs()}})).empty()) {
+        out["ok"] = false; out["error"] = "that answer has an invalid reply key, so it can't receive replies"; return out.dump();
+    }
     publishState();
     out["ok"] = true;
     return out.dump();
@@ -949,8 +979,8 @@ std::string WhisperboxCoreImpl::sendScores(std::string formId) {
         if (r.value("replies", 0) > 0) continue;
         const std::string rp = r.value("replyPub", "");
         if (rp.empty()) { skipped++; continue; }
-        sendReply(formId, confirmIdOf(r, formId), rp, json({{"kind", "score"}, {"score", r["score"]}, {"outOf", r["outOf"]}, {"correct", r["correct"]},
-                                                           {"from", m_signId.address}, {"at", nowMs()}}));
+        if (sendReply(formId, confirmIdOf(r, formId), rp, json({{"kind", "score"}, {"score", r["score"]}, {"outOf", r["outOf"]}, {"correct", r["correct"]},
+                                                               {"from", m_signId.address}, {"at", nowMs()}})).empty()) { skipped++; continue; }
         sent++;
     }
     if (sent) publishState();
@@ -1253,8 +1283,10 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
         std::string sealedHex = whisperbox::toHex(sealed);
         json p = {{"encryptedPayload", sealedHex}};
         json e = buildEvent(RESPONSE_SUBMIT, whisperbox::responseSubmitId(sealedHex), p, /*sign=*/false);
-        // per-form device tag on the wire: answers to different forms can't be linked by device
-        const std::string tag = whisperbox::responseDevTag(m_deviceId, formId);
+        // A fresh random tag per answer on the wire. It used to be sha256(deviceId|formId), but every
+        // signed event carries the device id in clear, so anyone could compute a user's tag for any
+        // form and link an anonymous answer to their device (review 2026-10-22, WB-5).
+        const std::string tag = "wb-" + randomHex(6);
         e["dev"] = tag; if (e.contains("hlc") && e["hlc"].is_object()) e["hlc"]["dev"] = tag;
         adoptLocal(e);
         broadcastEvent(e);
@@ -1291,9 +1323,21 @@ std::string WhisperboxCoreImpl::getDecryptedResponses(std::string formId) {
 }
 
 // ── manage ───────────────────────────────────────────────────────────────────────
+// A form id as links carry it (review 2026-10-22: anything used to be accepted and watched forever).
+static bool plausibleFormId(const std::string& id) {
+    static const std::regex re("^[a-z0-9][a-z0-9._:-]{0,127}$");
+    return std::regex_match(id, re);
+}
+static bool plausibleAddress(const std::string& a) {
+    static const std::regex re("^0x[0-9a-f]{40}$");
+    return std::regex_match(a, re);
+}
 std::string WhisperboxCoreImpl::joinForm(std::string formId) {
+    // a share link, not a bare id: importForm parses it and pins the creator it names
+    if (trim(formId).rfind("whisperbox://", 0) == 0) return importForm(formId);
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
-    formId = lc(formId);
+    formId = lc(trim(formId));
+    if (!plausibleFormId(formId)) return json({{"ok", false}, {"error", "that isn't a WhisperBox form id or link"}}).dump();
     m_watched.insert(formId);
     saveWatched();
     publishState();
@@ -1624,8 +1668,12 @@ std::string WhisperboxCoreImpl::importForm(std::string defJson) {
         out["ok"] = false; out["error"] = "def must include id (use shareUri output)"; return out.dump();
     }
     // publicKey is optional: short-URI imports get it from the canonical event.
-    std::string formId = lc(def.value("id", ""));
+    std::string formId = def["id"].is_string() ? lc(def["id"].get<std::string>()) : "";
     if (formId.empty()) { out["ok"] = false; out["error"] = "missing id"; return out.dump(); }
+    if (!plausibleFormId(formId)) { out["ok"] = false; out["error"] = "that link doesn't name a valid form id"; return out.dump(); }
+    if (def.contains("creator") && (!def["creator"].is_string() || !plausibleAddress(lc(def["creator"].get<std::string>())))) {
+        out["ok"] = false; out["error"] = "that link names a creator that isn't an address"; return out.dump();
+    }
 
     // No local placeholder event: an unsigned form.publish with the canonical id
     // would shadow the creator's signed event forever (union-by-id keeps the first

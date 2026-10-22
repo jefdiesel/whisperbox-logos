@@ -20,3 +20,11 @@ Status: accepted (0.3.2-0.3.3). Recorded 2026-10-03.
   we don't have.
 - Auto-close needs the creator's device (or a hub holding the identity) to be online; the
   cap and date are enforced by every reader regardless.
+
+## Update 2026-10-22 (review WB-2, WB-3)
+
+"Only as exact as the senders' clocks" understates it: a sender chooses its answer's HLC, so close,
+expiry, the cap and receipts can be bypassed by stamping an answer earlier than it was sent. Every
+reader enforces them, but on a value the sender controls. From 0.4.3 an event more than 5 minutes
+ahead of the receiver is dropped and can't move a clock forward (it used to set the receiver's clock
+to the year 2286, persisted). Open: enforce on the time the creator first saw the answer.
