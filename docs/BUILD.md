@@ -15,7 +15,7 @@ The protocol and behaviour these implement are in [SPEC.md](SPEC.md); design dec
 
 ```sh
 git clone --recurse-submodules git@github.com:vpavlin/whisperbox-logos.git
-cd whisperbox-logos && git checkout v0.2.0      # the development branch (name is historical)
+cd whisperbox-logos                              # main = the current line (Basecamp 0.3, 0.4.x)
 git submodule update --init --recursive
 ```
 
@@ -27,8 +27,9 @@ Submodules:
 | `third_party/loam-transport` | vpavlin/loam-transport | desktop transport reference |
 | `mobile/src/lib/loam-transport-pkg` | vpavlin/loam-transport | phone network layer (Loam shared node / own node) |
 
-Branches: `v0.2.0` = source; `artifacts` = binaries only (`releases/0.3.x/` + a README that
-jimmy-crib republishes from). `main` is the old 0.1 line.
+Branches: `main` = source (Basecamp 0.3, core/view 0.4.x); `v0.2.0` = the Basecamp 0.2 line
+(0.3.x, no longer maintained); `artifacts` = binaries only (`releases/0.3.x/` + a README that
+jimmy-crib republishes from).
 
 ## 2. Toolchain
 
@@ -209,9 +210,28 @@ store anyway).
 
 ## 7. Headless hub and test tools
 
+<a id="headless"></a>
+**0.4.x (Basecamp 0.3 runtime): `logosctl`.** The core runs under the same runtime as Basecamp
+0.3. One session per node, each with its own `HOME`, data dir and config dir:
+
+```sh
+S=/srv/wb-hub; mkdir -p $S/home/.whisperbox-core
+export HOME=$S/home WHISPERBOX_CORE_DATA=$S/home/.whisperbox-core LOGOSCTL_CONFIG_DIR=$S/cfg QT_QPA_PLATFORM=offscreen
+logosctl daemon start --detach
+for f in lgx/*.lgx; do logosctl install "$f" -y; done   # whisperbox_core + loam_core, delivery_module, keycard, ble_mesh
+logosctl module load whisperbox_core
+logosctl call whisperbox_core createForm 'str:{"title":"Lunch?","questions":[{"id":"q1","type":"radioButtons","text":"Where?","required":true,"options":["Sushi","Tacos"]}]}'
+logosctl call whisperbox_core getDecryptedResponses str:form-...
+```
+
+Set `WHISPERBOX_CORE_DATA`: without it the core keeps its data under the account's real home
+(`getpwuid`), so every session on one account shares one identity. A full two-node test against
+the live network is in the review kit (`probes/live-two-node.sh`, 2026-10-22).
+
+**0.3.x (Basecamp 0.2 runtime): logoscore.**
 - `hub/whisperbox` + `hub/README.md`: run `whisperbox_core` headless under a pinned
   logoscore via logos-hub (create, answer, decrypt, confirm from a shell). The logoscore pin
-  must match the SDK generation the `.lgx` was built with.
+  must match the SDK generation the `.lgx` was built with. Not for 0.4.x packages.
 - `hub/whisperbox-hub.service`: systemd user unit for an always-on hub (holds only sealed
   blobs, never a key that opens them).
 - `hub/fill-form '<share link>' -n 12`: answers a form N times, each as a fresh identity, on

@@ -182,12 +182,16 @@ when the form has a whitelist or allows edits, else `null`.
     joining a form, answering peers' rounds by serving the missing events.
   - `{"type": "SYNC_REQ", "from": deviceId, "rbsr": true?}`: legacy 0.1.x catch-up. Flagged
     requests are ignored; unflagged ones trigger at most one full re-broadcast per 3 s.
-- Desktop sends each event twice: relay publish on the topic (reaches every subscriber) and
-  an SDS reliable-channel send on the same id (fast path). Phone: via loam-transport (Loam
-  shared node or own node).
-- Delivery node: `{mode: "Core", preset: "logos.test", relay: true, entryNodes: [6 pinned logos.test fleet nodes]}`;
-  `$WHISPERBOX_DELIVERY_CFG` (JSON) overrides fields. If the node already exists in the host
-  (another app created it), join it, never create or start it again.
+- Desktop (0.4.x): through `loam_core`, the shared transport module, started with
+  `{mode: "Core", preset: "logos.test", useChannels: false}`: a plain relay publish on the topic.
+  Delivery 0.3's reliable channels are off on purpose: they held back every message whose causal
+  history the node hadn't seen, so a desktop received nothing from a phone with history. The
+  RBSR catch-up above provides the reliability. `$WHISPERBOX_DELIVERY_CFG` (JSON) replaces the
+  config. If another app already started the shared node, joining it is enough.
+- Phone: via loam-transport (the Loam shared node or its own node). loam_core unwraps the
+  phones' channel frames on the relay path, and phones accept plain relay frames.
+- Transport status: the view shows loam_core's status as it changes, including after the first
+  connect (e.g. "Transport stalled: ..."); a return to "Connected" runs a catch-up round.
 - Events are broadcast only while the node is up; local events wait in the log and go out
   through catch-up.
 
@@ -327,7 +331,7 @@ exposes the same names.
 | `confirmResponse` | formId, respondent address | creator / co-owner |
 | `confirmAll` | formId | one batch receipt for every unreceipted answer |
 | `setAutoReceipts` | formId, "1"/"0" | local setting |
-| `getDecryptedResponses` / `exportCsv` | formId | creator / co-owner; CSV has a `score` column on quizzes |
+| `getDecryptedResponses` / `exportCsv` | formId | creator / co-owner; CSV has a `score` column on quizzes. Cells are answers from untrusted respondents: one starting with `=`, `+`, `-`, `@`, tab or CR that isn't a plain number gets a leading `'`, so a spreadsheet shows it as text instead of running it as a formula |
 | `addCoOwner` | formId, co-owner code (pub33 hex) | creator only; needs the form key on this device |
 | `replyToResponse` | formId, confirmationId, message | creator / co-owner |
 | `sendScores` | formId | one score reply per answer without any reply yet |
@@ -346,6 +350,11 @@ Desktop data dir: `$WHISPERBOX_CORE_DATA`, else the first writable of `~/.whispe
 (home from the user database, never a relative path) and the host's instance folder. If the
 chosen folder has no identity but another candidate does, its files are adopted. Files are
 written atomically (temp file + rename); unreadable files are quarantined, not overwritten.
+The folder is owner-only (0700) and every file in it 0600: it holds the private key every form
+key derives from, and plaintext copies of the user's own answers. A start tightens folders that
+older versions wrote 0755/0644. Nothing in it is encrypted at rest. Because the home comes from
+the user database, every Basecamp profile of one account shares one identity unless
+`$WHISPERBOX_CORE_DATA` says otherwise.
 
 | file | content |
 |---|---|

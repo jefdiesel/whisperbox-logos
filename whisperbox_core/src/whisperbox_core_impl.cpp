@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cctype>
 #include <fstream>
+#include <regex>
 #include <algorithm>
 #include <typeinfo>
 #include <ctime>
@@ -48,16 +49,29 @@ static bool isHex(const std::string& s, size_t len) {
 // Crash-safe file write: write <path>.tmp, then rename over <path> (atomic on POSIX). A
 // module killed mid-write (Basecamp quitting during sync) leaves the old file intact
 // instead of a truncated one that the next start would read as corrupt.
+// Owner-only: the data dir holds the identity's private key (every form key derives from it) and
+// the respondent's own answers in plain text.
+static constexpr std::filesystem::perms kPrivateFile = std::filesystem::perms::owner_read | std::filesystem::perms::owner_write;
+static constexpr std::filesystem::perms kPrivateDir = std::filesystem::perms::owner_all;
 static bool writeAtomic(const std::string& path, const std::string& content) {
     const std::string tmp = path + ".tmp";
     {
         std::ofstream f(tmp, std::ios::trunc | std::ios::binary);
         if (!f) return false;
+        std::error_code ec;   // before the content goes in: no moment with a readable copy
+        std::filesystem::permissions(tmp, kPrivateFile, std::filesystem::perm_options::replace, ec);
         f << content;
         f.flush();
         if (!f) return false;
     }
     return std::rename(tmp.c_str(), path.c_str()) == 0;
+}
+// Existing installs wrote everything 0644 (review 2026-10-22): tighten the dir and its files.
+static void makePrivate(const std::string& dir) {
+    std::error_code ec;
+    std::filesystem::permissions(dir, kPrivateDir, std::filesystem::perm_options::replace, ec);
+    for (const auto& de : std::filesystem::directory_iterator(dir, ec))
+        if (de.is_regular_file(ec)) std::filesystem::permissions(de.path(), kPrivateFile, std::filesystem::perm_options::replace, ec);
 }
 // Move an unreadable file aside (never overwrite it): the data may still be recoverable.
 static void quarantine(const std::string& path) {
@@ -231,6 +245,7 @@ void WhisperboxCoreImpl::setupDataDir() {
     if (const char* ov = std::getenv("WHISPERBOX_CORE_DATA")) {
         m_dataDir = ov;
         if (!dirWritable(m_dataDir)) { m_storageOk = false; m_storageNote = "Can't save to " + m_dataDir; }
+        else makePrivate(m_dataDir);
         return;
     }
     std::vector<std::string> cands;
@@ -261,6 +276,7 @@ void WhisperboxCoreImpl::setupDataDir() {
             break;
         }
     }
+    makePrivate(m_dataDir);
 }
 std::string WhisperboxCoreImpl::randomHex(int bytes) {
     // CSPRNG — never rand(): an unseeded rand() is deterministic per process,
@@ -480,6 +496,14 @@ void WhisperboxCoreImpl::onTransportStatus(const std::string& st) {
         publishState();
     } else if (!m_nodeReady) {
         setStatus(st);
+    } else if (st != m_status) {
+        // After the first connect, keep showing what the transport says: loam_core reports
+        // "Transport stalled: ..." when the delivery node stops answering, and the view must not
+        // keep saying "Connected" (review 2026-10-22). Back to Connected: catch up what was missed.
+        const bool recovered = st == "Connected";
+        setStatus(st);
+        if (recovered) catchupRound();
+        publishState();
     }
 }
 
@@ -1631,7 +1655,11 @@ std::string WhisperboxCoreImpl::exportCsv(std::string formId) {
 
     OrderedJson view = decryptView(state);
 
-    auto csvCell = [](const std::string& v) {
+    auto csvCell = [](std::string v) {
+        // Answers come from respondents: a cell starting with = + - @ (or tab/CR) is a formula to a
+        // spreadsheet (=HYPERLINK(...) leaks other cells). Plain numbers stay numbers.
+        static const std::regex number("^[+-]?[0-9]+([.][0-9]+)?$");
+        if (!v.empty() && std::string("=+-@\t\r").find(v[0]) != std::string::npos && !std::regex_match(v, number)) v = "'" + v;
         if (v.find_first_of(",\"\r\n") != std::string::npos) {
             std::string o = "\""; for (char c : v) { if (c == '"') o += "\"\""; else o += c; } return o + "\"";
         }

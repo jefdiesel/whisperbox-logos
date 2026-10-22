@@ -203,7 +203,7 @@ footer p { margin: 0; max-width: 70ch; }
     <div class="copy-col">
       <span class="label">Encrypted forms for Logos Basecamp</span>
       <h1>Ask in public. <em>Read in private.</em></h1>
-      <p class="lede">Publish a form anyone can find. Each answer is sealed on the respondent's own device to your key, so the network carries only noise and only you can open it. There's no server, and no account to sign up for.</p>
+      <p class="lede">Publish a form and share its link or QR code. Each answer is sealed on the respondent's own device to your key, so the network carries only noise and only you can open it. There's no server, and no account to sign up for.</p>
     </div>
     <svg class="whisper" viewBox="0 0 300 230" role="img" aria-label="Two people whispering. One says: psst, have you heard? The other: heard what?">
       <g class="lean">
@@ -313,12 +313,13 @@ footer p { margin: 0; max-width: 70ch; }
         <p>Your device decrypts the pool, sends each respondent a receipt, and exports a CSV. The receipt carries a random id only the respondent recognises.</p>
       </li>
     </ol>
+    <p class="sub">Also in the box: anonymous forms (even you don't learn who answered), members-only forms, co-owners who can read the answers too, quizzes with privately sent scores, private replies, answer edits for a set window, response caps, closing dates, drafts and scheduled publishing. On Android, your form keys can live on a Status Keycard.</p>
   </section>
 
   <section id="privacy">
     <span class="label">Who gets to gossip about what</span>
     <h2>What's public, what's sealed</h2>
-    <p class="sub">Forms are meant to be found, so their definitions are public. Everything about a response is sealed.</p>
+    <p class="sub">Forms aren't listed anywhere: people reach them by link or QR code. A form's definition travels in the clear, so anyone with the link, or anyone watching the topic, can read it. The contents of a response are sealed.</p>
     <div class="ledger">
       <table>
         <thead><tr><th>Item</th><th>On the network</th><th>Who can read it</th></tr></thead>
@@ -326,38 +327,39 @@ footer p { margin: 0; max-width: 70ch; }
           <tr><td>Form title and questions</td><td><span class="pill pub">public</span></td><td>Anyone on the topic</td></tr>
           <tr><td>Who may answer</td><td><span class="pill pub">public</span></td><td>Anyone; restricted forms list the allowed addresses</td></tr>
           <tr><td>The answers</td><td><span class="pill sealed">sealed</span></td><td>Only the form's creator</td></tr>
-          <tr><td>Who answered</td><td><span class="pill sealed">sealed</span></td><td>Only the form's creator</td></tr>
+          <tr><td>Who answered</td><td><span class="pill sealed">sealed</span></td><td>Only the form's creator; on an anonymous form, nobody</td></tr>
+          <tr><td>That a response was sent, and from which network node</td><td><span class="pill pub">visible</span></td><td>The network nodes that relay it (there's no mixnet in this path)</td></tr>
           <tr><td>Receipt</td><td><span class="pill pub">public</span></td><td>Anyone sees it was sent; only the respondent can tell it's theirs</td></tr>
         </tbody>
       </table>
     </div>
-    <p class="note">The network's store nodes keep sealed blobs so new devices can catch up. Without the form key they are useless; that's the trade for having no server.</p>
+    <p class="note">The network's store nodes keep sealed blobs so new devices can catch up. Without the form key they are useless; that's the trade for having no server. On your own computer, your key, your forms and your answers are stored unencrypted in a folder only your user account can read.</p>
   </section>
 
   <section id="get">
     <h2>Get it</h2>
-    <p class="sub">WhisperBox runs inside Logos Basecamp 0.2, on Android phones, or headless on any Linux box as an always-on hub. They all speak the same protocol, so a form made on one is answered on the others.</p>
+    <p class="sub">WhisperBox runs inside Logos Basecamp 0.3 (Linux x64 and ARM64, macOS on Apple Silicon), on Android phones, or headless on any Linux box as an always-on hub. They all speak the same protocol, so a form made on one is answered on the others.</p>
     <div class="get">
       <div>
         <h3>In Basecamp</h3>
-        <p>Settings → Package Repositories → add this URL, then install WhisperBox from the package manager. It brings its core and the delivery module with it.</p>
+        <p>Settings → Package Repositories → add this URL, then install WhisperBox from the package manager. It brings its core and the shared transport (Loam, with the delivery module) with it.</p>
         <div class="copy">
-          <code id="repo">https://raw.githubusercontent.com/jimmy-claw/whisperbox-basecamp/main/logos-repo.json</code>
+          <code id="repo">https://apps.vpavlin.xyz/logos-repo.json</code>
           <button type="button" id="copy-repo">Copy</button>
         </div>
       </div>
       <div>
         <h3>On Android</h3>
-        <p>Install <strong>Loam</strong> (the one network node your Logos apps share) and <strong>WhisperBox</strong> from the Loam F-Droid repository, open Loam once and approve WhisperBox. Scan a form's QR code or tap its link to answer; your key never leaves the phone.</p>
+        <p>Install <strong>Loam</strong> (the one network node your Logos apps share) and <strong>WhisperBox</strong> from the F-Droid repository <code>https://apps.vpavlin.xyz/fdroid/repo</code>, open Loam once and approve WhisperBox. Scan a form's QR code or tap its link to answer; your key never leaves the phone.</p>
       </div>
       <div>
         <h3>As a headless hub</h3>
-        <p>The same core under <code>logoscore</code>, driven from the shell. Setup is in <a href="https://github.com/vpavlin/whisperbox-logos/tree/main/hub">hub/README.md</a>.</p>
-<pre><span class="c"># publish, share, read</span>
-whisperbox create --title "Lunch?" \
-  --question "radio:Where??Sushi|Tacos"
-whisperbox uri form-…
-whisperbox responses form-…</pre>
+        <p>The same core under <code>logosctl</code>, the Basecamp 0.3 runtime without the window, driven from the shell. Setup is in <a href="https://github.com/vpavlin/whisperbox-logos/blob/main/docs/BUILD.md#headless">docs/BUILD.md</a>.</p>
+<pre style="overflow-x:auto"><span class="c"># publish, share, read</span>
+wb() { logosctl call whisperbox_core "$@"; }
+wb createForm 'str:{"title":…}'
+wb shareUri str:form-…
+wb getDecryptedResponses str:form-…</pre>
       </div>
     </div>
   </section>

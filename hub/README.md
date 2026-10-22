@@ -1,5 +1,8 @@
 # WhisperBox Hub — headless command-line operation
 
+> **For WhisperBox 0.3.x on the Basecamp 0.2 runtime (logoscore).** WhisperBox 0.4.x runs on the
+> Basecamp 0.3 runtime: use `logosctl` instead, as in [docs/BUILD.md](../docs/BUILD.md#headless).
+
 Run `whisperbox_core` in a **logoscore daemon** and drive it from the shell:
 create forms, join, answer, decrypt responses — no Basecamp UI, no click magic.
 This is the HUB-PLAN (Option B realized): the same `.lgx` code that Basecamp
