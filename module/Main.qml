@@ -1451,7 +1451,7 @@ Item {
                                                             color: index === 3 + root.sel.questions.length ? (trow.r.confirmed ? root.wbSuccess : root.wbWarning) : root.wbText
                                                             text: {
                                                                 if (index === 0) return String(trow.ri + 1) + (trow.r.edits > 0 ? " \u270E" : "");
-                                                                if (index === 1) return root.shortAddr(trow.r.respondent);
+                                                                if (index === 1) return root.shortAddr(trow.r.respondent) + (trow.r.verified === false ? "  (unverified)" : "");
                                                                 if (index === 2) return Qt.formatDateTime(new Date(Number(trow.r.submittedAt || 0)), "d MMM hh:mm");
                                                                 if (index === 3 + root.sel.questions.length) return trow.r.confirmed ? "sent" : "pending";
                                                                 if (index === 4 + root.sel.questions.length) return root.scoreText(trow.r) + (trow.r.replies > 0 ? "  \u2709" : "");
@@ -1534,7 +1534,8 @@ Item {
                                         RowLayout {
                                             Layout.fillWidth: true
                                             spacing: 8
-                                            Text { textFormat: Text.PlainText; text: oneNav.r ? root.shortAddr(oneNav.r.respondent) : ""; font.pixelSize: 12; font.family: "monospace"; color: root.wbTextSec
+                                            // ADR 0019: an unsigned answer (older client, or someone claiming this address) proves nothing
+                                            Text { textFormat: Text.PlainText; text: oneNav.r ? root.shortAddr(oneNav.r.respondent) + (oneNav.r.verified === false ? "  unverified: not signed, could be from anyone" : "") : ""; font.pixelSize: 12; font.family: "monospace"; color: oneNav.r && oneNav.r.verified === false ? root.wbWarning : root.wbTextSec
                                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.copyText(oneNav.r.respondent, "Address") } }
                                             Text { textFormat: Text.PlainText; text: oneNav.r ? root.fmtTime(oneNav.r.submittedAt) : ""; font.pixelSize: 11; color: root.wbTextTert }
                                             Item { Layout.fillWidth: true }

@@ -522,20 +522,40 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
         if (f.contains("expiresAt") && f["expiresAt"].is_number() && blob["hlc"].contains("wall")
             && blob["hlc"]["wall"].get<double>() > f["expiresAt"].get<double>()) { drop(dropped, "expired"); continue; }
 
-        // Whitelist + inner signature (original: enforced only when whitelist != none).
+        // Inner signature (ADR 0019, mirror engine.mjs): every answer from 0.5.0 is signed by the
+        // respondent it names. Bad signature: dropped. Unsigned: dropped on members-only and editable
+        // forms; on an open form listed as unverified, outside the one-per-respondent check, the cap
+        // and edits (an unsigned answer claiming someone's address used to replace theirs, WB-2).
         std::string wlType = f["whitelist"].value("type", "none");
         const bool allowEdits = f.contains("allowEdits") && f["allowEdits"].is_boolean() && f["allowEdits"].get<bool>();
-        if ((wlType != "none" || allowEdits) && verifyResponse) {   // edits must be signed too
-            OrderedJson pseudo = OrderedJson::object();
-            pseudo["v"] = 1;
-            pseudo["id"] = blob["id"];
-            pseudo["type"] = RESPONSE_SUBMIT;
-            pseudo["hlc"] = blob["hlc"];
-            pseudo["dev"] = "";
-            pseudo["payload"] = dec;
-            pseudo["pub"] = dec.contains("pub") ? dec["pub"] : nullptr;
-            pseudo["sig"] = dec.value("signature", (json) nullptr);
-            if (!verifyResponse(pseudo)) { drop(dropped, "sig-invalid"); continue; }
+        if (verifyResponse) {
+            const bool isSigned = dec.contains("signature") && dec["signature"].is_string() && !dec["signature"].get<std::string>().empty();
+            if (isSigned) {
+                OrderedJson pseudo = OrderedJson::object();
+                pseudo["v"] = 1;
+                pseudo["id"] = blob["id"];
+                pseudo["type"] = RESPONSE_SUBMIT;
+                pseudo["hlc"] = blob["hlc"];
+                pseudo["dev"] = "";
+                pseudo["payload"] = dec;
+                pseudo["pub"] = dec.contains("pub") ? dec["pub"] : nullptr;
+                pseudo["sig"] = dec["signature"];
+                if (!verifyResponse(pseudo)) { drop(dropped, "sig-invalid"); continue; }
+            } else if (wlType != "none" || allowEdits) { drop(dropped, "sig-invalid"); continue; }
+            else {
+                // still the creator's to read and export (older clients didn't sign), but it proves
+                // nothing: no respondent slot, no cap, no edits (mirror engine.mjs)
+                OrderedJson u = OrderedJson::object();
+                u["respondent"] = dec.contains("respondent") && dec["respondent"].is_string() ? lc(dec["respondent"].get<std::string>()) : std::string();
+                u["submittedAt"] = dec.contains("submittedAt") && !dec["submittedAt"].is_null() ? dec["submittedAt"] : json(nullptr);
+                u["answers"] = dec.contains("answers") && dec["answers"].is_array() ? dec["answers"] : json::array();
+                u["signature"] = nullptr;
+                u["confirmationId"] = dec.contains("confirmationId") && dec["confirmationId"].is_string() ? dec["confirmationId"] : json(nullptr);
+                u["hlc"] = blob["hlc"];
+                u["verified"] = false;
+                respObj[formId].push_back(u);
+                continue;
+            }
         }
 
         std::string respondent = lc(dec.value("respondent", ""));
@@ -569,8 +589,10 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
         meta.cid = dec.contains("confirmationId") && dec["confirmationId"].is_string() ? dec["confirmationId"].get<std::string>() : "";
         seen[respondent] = meta;
         // Answer cap: the first maxResponses in HLC order count (same on every replica).
+        long long countedSoFar = 0;   // unverified answers don't count towards the cap (ADR 0019)
+        for (const auto& x : respObj[formId]) if (!(x.contains("verified") && x["verified"].is_boolean() && !x["verified"].get<bool>())) countedSoFar++;
         if (f.contains("maxResponses") && f["maxResponses"].is_number()
-            && (long long)respObj[formId].size() >= f["maxResponses"].get<long long>()) { drop(dropped, "over-limit"); continue; }
+            && countedSoFar >= f["maxResponses"].get<long long>()) { drop(dropped, "over-limit"); continue; }
 
         OrderedJson r = OrderedJson::object();
         r["respondent"] = respondent;
@@ -582,6 +604,7 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
         r["hlc"] = blob["hlc"];
         if (isReplyPub(dec)) r["replyPub"] = lc(dec["replyPub"].get<std::string>());
         if (allowEdits) r["edits"] = 0;   // only on editable forms (keeps older vectors stable)
+        if (verifyResponse) r["verified"] = true;   // ADR 0019 (only with a verifier, as engine.mjs)
         seen[respondent].index = (long long)respObj[formId].size();
         respObj[formId].push_back(r);
       } catch (const std::exception&) { drop(dropped, "malformed"); }

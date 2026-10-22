@@ -1257,10 +1257,8 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
     resp["confirmationId"] = confirmationId;
     // one-off key for private replies / quiz scores to this answer (re-derivable, unlinkable)
     resp["replyPub"] = whisperbox::deriveReplyKey(m_signId, formId, confirmationId).pubHex;
-    std::string wlType = f["whitelist"].value("type", "none");
-    if (wlType != "none" || allowEdits) {   // editable forms: signed, so nobody can "edit" someone else's answer
-        // Inner signature over the canonical content (verified by the creator when
-        // whitelist != none): address(pub) must equal respondent.
+    {   // Every answer is signed by the respondent it names (ADR 0019): nobody can answer in
+        // someone else's name or replace their answer. Inside the sealed payload: the wire names nobody.
         OrderedJson m = OrderedJson::object();
         m["formId"] = formId;
         m["respondent"] = me.address;
@@ -1270,9 +1268,6 @@ std::string WhisperboxCoreImpl::submitResponse(std::string formId, std::string a
         whisperbox::Bytes digest = whisperbox::sha256(whisperbox::Bytes(msg.begin(), msg.end()));
         resp["signature"] = whisperbox::toHex(whisperbox::ecdsaSignLowS(me.priv, digest));
         resp["pub"] = me.pubHex;
-    } else {
-        resp["signature"] = nullptr;
-        resp["pub"] = nullptr;
     }
 
     std::string creatorPubHex = f["publicKey"].get<std::string>();

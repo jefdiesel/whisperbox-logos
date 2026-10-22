@@ -804,6 +804,40 @@ int main(int argc, char** argv) {
         CHECK(!A->call(A->core->importForm("whisperbox://form?id=%")).value("ok", true), "...and a malformed escape");
         json jl = A->call(A->core->joinForm("whisperbox://form?id=" + fid + "&by=" + addrA));
         CHECK(jl.value("ok", false) && jl.value("formId", "") == fid, "joinForm with a link returns the form id, not the link");
+        // a sealed answer is the sender's JSON too: wrongly-typed fields inside must not crash the creator
+        {
+            std::string fpub = formOf(*A, fid).value("publicKey", "");
+            for (const char* inner : {R"({"formId":1,"respondent":1,"answers":"x","submittedAt":"y"})", R"({"respondent":"0xab","answers":[1,{"questionId":2}],"confirmationId":5,"replyPub":7})", R"([1,2])", R"("str")"}) {
+                std::string ptxt = inner;
+                std::string sealedHex = whisperbox::toHex(whisperbox::eciesSeal(whisperbox::fromHex(fpub), whisperbox::Bytes(ptxt.begin(), ptxt.end())));
+                json ev = {{"v", 1}, {"id", whisperbox::responseSubmitId(sealedHex)}, {"type", "response.submit"}, {"hlc", {{"wall", (long long)QDateTime::currentMSecsSinceEpoch()}, {"ctr", 0}, {"dev", "wb-x"}}},
+                           {"dev", "wb-x"}, {"payload", {{"encryptedPayload", sealedHex}}}};
+                send(json({{"v", 1}, {"type", "EVENT"}, {"event", ev}}).dump());
+            }
+            pump(400);
+            CHECK(A->snap()["identity"]["address"] == addrA, "sealed answers with wrongly-typed fields don't crash the creator's view");
+            A->stop(); A->start();
+            CHECK(A->snap()["identity"]["address"] == addrA, "...nor its restart");
+        }
+        // ADR 0019 / WB-2: an unsigned answer in B's name, stamped a minute earlier, used to replace B's real one
+        {
+            json fz = A->call(A->core->createForm(json({{"title", "impersonation"}, {"questions", json::array({{{"id", "q"}, {"type", "shortText"}, {"text", "x"}, {"required", true}}})}}).dump()));
+            std::string fzid = fz.value("formId", "");
+            CHECK(waitUntil([&] { return hasForm(*B, fzid); }, 3000), "the impersonation form reaches B");
+            std::string fpub = formOf(*A, fzid).value("publicKey", "");
+            json fake = {{"formId", fzid}, {"respondent", addrB}, {"submittedAt", nullptr}, {"answers", json::array({{{"questionId", "q"}, {"value", "FAKE"}}})}, {"signature", nullptr}, {"pub", nullptr}};
+            std::string ftxt = fake.dump();
+            std::string sealedHex = whisperbox::toHex(whisperbox::eciesSeal(whisperbox::fromHex(fpub), whisperbox::Bytes(ftxt.begin(), ftxt.end())));
+            json ev = {{"v", 1}, {"id", whisperbox::responseSubmitId(sealedHex)}, {"type", "response.submit"}, {"hlc", {{"wall", (long long)QDateTime::currentMSecsSinceEpoch() - 60000}, {"ctr", 0}, {"dev", "wb-x"}}},
+                       {"dev", "wb-x"}, {"payload", {{"encryptedPayload", sealedHex}}}};
+            send(json({{"v", 1}, {"type", "EVENT"}, {"event", ev}}).dump());
+            pump(300);
+            CHECK(B->call(B->core->submitResponse(fzid, json::array({{{"questionId", "q"}, {"value", "real"}}}).dump())).value("ok", false), "B answers for real");
+            auto verifiedOf = [&](bool v) { json out = json::array(); for (const auto& r : responsesOf(*A, fzid)) if (r.value("verified", true) == v) out.push_back(r); return out; };
+            CHECK(waitUntil([&] { auto r = verifiedOf(true); return r.size() == 1 && r[0]["answers"][0].value("value", "") == "real"; }, 3000),
+                  "A counts B's signed answer, not the earlier forged one");
+            CHECK(verifiedOf(false).size() == 1 && verifiedOf(false)[0]["answers"][0].value("value", "") == "FAKE", "the forged answer is kept, marked unverified");
+        }
     }
 
     std::printf("\n%d/%d checks passed\n", checks - failures, checks);
