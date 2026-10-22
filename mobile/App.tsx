@@ -779,7 +779,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
                     return (
                       <View key={i} style={[st.card, { flexDirection: "row", alignItems: "center", gap: 10 }]}>
                         <Text style={[st.answer, { flex: 1 }, !t && { color: C.text3 }]}>{t || "(no answer)"}</Text>
-                        <Text style={[st.time, { fontFamily: MONO }]}>{shortAddr(r.respondent)}</Text>
+                        <Text style={[st.time, { fontFamily: MONO }, r.verified === false && { color: C.warn }]}>{shortAddr(r.respondent)}{r.verified === false ? " ?" : ""}</Text>
                       </View>
                     );
                   }) : null; })()}
@@ -795,7 +795,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
                   {list.map((r, ri) => (
                     <Pressable key={r.respondent + ri} onPress={() => { setIdx(ri); setMode("one"); }} style={[st.trow, ri % 2 ? { backgroundColor: C.raised } : null]}>
                       <Text style={[st.td, { width: 36 }]}>{ri + 1}{r.edits > 0 ? " ✎" : ""}</Text>
-                      <Text style={[st.td, { width: 110, fontFamily: MONO }]} numberOfLines={1}>{shortAddr(r.respondent)}</Text>
+                      <Text style={[st.td, { width: 110, fontFamily: MONO }, r.verified === false && { color: C.warn }]} numberOfLines={1}>{shortAddr(r.respondent)}{r.verified === false ? " (unverified)" : ""}</Text>
                       {(f.questions || []).map((q: any) => <Text key={q.id} style={[st.td, { width: 160 }]} numberOfLines={2}>{answerText(q, answerOf(r, q.id))}</Text>)}
                       <Text style={[st.td, { width: 160, color: r.confirmed ? C.ok : C.warn }]}>{r.confirmed ? "sent" : "pending"}</Text>
                       {f.quiz ? <Text style={[st.td, { width: 160 }]}>{scoreText(r)}{r.replies > 0 ? "  ✉" : ""}</Text> : null}
@@ -834,8 +834,10 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
                       {cur.outOf !== undefined ? <Badge label={scoreText(cur)} fg={C.ok} bg={C.okSubtle} /> : null}
                       {cur.replies > 0 ? <Badge label={`${plural(cur.replies, "reply", "replies")}`} fg={C.primary} bg={C.primarySubtle} /> : null}
                       {cur.edits > 0 ? <Badge label="edited" fg={C.accent} bg={C.warnSubtle} /> : null}
+                      {cur.verified === false ? <Badge label="unverified" fg={C.warn} bg={C.warnSubtle} /> : null}
                       {cur.confirmed ? <Badge label="Receipt sent" /> : <Btn label="Send receipt" onPress={() => { const x = client.confirmResponse(id, cur.respondent); toast(x.ok ? "Receipt sent" : x.error); }} />}
                     </View>
+                    {cur.verified === false ? <Text style={[st.time, { color: C.warn, marginTop: 6 }]}>Not signed: this answer could be from anyone, so it doesn't count towards the limit.</Text> : null}
                     {(f.questions || []).map((q: any, qi: number) => {
                       const v = answerText(q, answerOf(cur, q.id));
                       const ok = cur.correct && q.id in cur.correct ? cur.correct[q.id] : null;
