@@ -256,15 +256,26 @@ Rules, per event:
 ## 9. Creator view (`creatorView`)
 
 Run by a creator or co-owner over the pool, in HLC order, with the keys it holds (its own
-forms' keys plus co-owned form keys opened from `form.coowner`). For each blob:
+forms' keys plus co-owned form keys opened from `form.coowner`).
+
+**Answer time (ADR 0019).** A client passes `netTime(eventId)`: the earliest Logos Delivery
+timestamp (ms) it has seen for that `response.submit` (live, from the store, or a re-served copy;
+kept locally, `wb-nettime` / `nettime.json`, never synced). With it, an answer's time `t` is that
+network time, the pool is processed in `t` order (HLC breaks ties), and every rule below that
+says "stamped" compares `t` (against a creator-signed HLC by wall clock). An answer with no
+network time (BLE, an older transport) uses its own `hlc.wall` as before. Without `netTime` the
+view is the HLC-only fold (identical on every replica; the golden vectors). For each blob:
 
 1. Trial-open with every held form key (cached per blob; retried only when the key set
    grows). Not openable means `undecrypted`. The opening key MUST be the `publicKey` of the
    form named in the plaintext, otherwise the blob is ignored. Blobs don't name their form on
    purpose: that would publish per-form answer counts.
-2. Drop if stamped inside any closed span (`from <= hlc < to`) (`form-closed`), or if
-   `hlc.wall > expiresAt` (`expired`).
-3. Forms with a whitelist or `allowEdits`: inner signature must verify (`sig-invalid`).
+2. Drop if stamped inside any closed span (`from <= t < to`) (`form-closed`), or if
+   `t > expiresAt` (`expired`).
+3. Inner signature: a signed answer must verify and be signed by the `respondent` it names
+   (`sig-invalid`). Unsigned: dropped on forms with a whitelist or `allowEdits` (`sig-invalid`);
+   on an open form kept as `verified: false`, outside steps 4-6 (no respondent slot, no cap, no
+   edits). Every 0.5.0 client signs; unsigned answers come from older clients or forgers.
 4. `respondent` required (`no-respondent`); whitelisted forms: respondent must be listed
    (`not-whitelisted`).
 5. Same respondent seen before for this form:
@@ -276,10 +287,14 @@ forms' keys plus co-owned form keys opened from `form.coowner`). For each blob:
 6. Answer cap: once `maxResponses` answers are accepted, later first answers are dropped
    (`over-limit`). "First N" is by HLC, so identical on every replica.
 7. Accept: `{respondent, submittedAt, answers, signature, confirmationId, hlc, replyPub?, edits?}`
-   (`edits` only on forms that allow edits).
+   (`edits` only on forms that allow edits), plus `verified: true` with a verifier, and with
+   `netTime`: `timeVerified` (a network time was seen), `receivedAt` (it, or null) and
+   `timeSkew: true` when the signed `submittedAt` is more than 5 minutes from it.
 
-Closing, expiry and the cap are decided by HLC across devices, so they are only as exact as
-the senders' clocks. This is accepted (ADR 0008).
+The network time is a time the network vouches the answer existed by: with RLN on, relays refuse
+a message stamped more than ~20 s from their clock and the timestamp is bound into the proof.
+Without RLN (our nodes today) it is only as honest as the sender's node. Answers without one are
+judged by their own HLC and shown as "time not verified" (ADR 0008, ADR 0019).
 
 ## 10. Module layer (core and client, not the engine)
 
@@ -397,12 +412,12 @@ Linkability:
 - anonymous forms: the respondent address is a per-form derived identity, unlinkable to the
   real address and across forms.
 
-Not authenticated on forms open to anyone (review 2026-10-22, WB-2, open): `response.submit` is
-unsigned and its HLC is chosen by the sender. A member can send several answers (one per
-identity they generate), send one claiming another respondent's address (the earliest HLC per
-respondent wins), and stamp an answer before a close, an expiry or a receipt, or fill
-`maxResponses`, since those compare the answer's own HLC. "Only listed addresses" forms check the
-inner signature.
+Forms open to anyone (review 2026-10-22, WB-2; ADR 0019, 0.5.0): every answer is signed inside
+the sealed payload, so nobody can answer in another respondent's name; an unsigned one is shown
+as unverified and counts for nothing. Anyone can still generate fresh identities and answer once
+with each (only a members list stops that). Close, expiry, the cap and the edit window use the
+network's timestamp of the answer; before RLN is on, a sender running a modified node can still
+choose that timestamp, and an answer arriving without one (BLE) is judged by its own clock.
 
 Not protected: timing/network-level correlation; answer length (answers aren't padded); the
 creator (and co-owners) see everything in an answer; a co-owner keeps access forever; there is

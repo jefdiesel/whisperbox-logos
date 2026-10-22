@@ -1,6 +1,7 @@
 #pragma once
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <regex>
 // whisperbox_engine.hpp — pure, deterministic fold from a merged WhisperBox event
 // log to app state (computeState) + CREATOR VIEW (creatorView). C++ port of
@@ -461,10 +462,17 @@ inline bool isReplyPub(const json& dec) {
     return v.size() == 66 && (v.rfind("02", 0) == 0 || v.rfind("03", 0) == 0) && v.find_first_not_of("0123456789abcdef") == std::string::npos;
 }
 
+// A signed submittedAt this far from the network time is flagged (timeSkew), ADR 0019.
+constexpr long long kMaxTimeSkewMs = 5LL * 60 * 1000;
+
 inline OrderedJson creatorView(const OrderedJson& state, const std::string& identity,
                                std::function<json(const std::string&)> open,
                                std::function<bool(const json&)> verifyResponse = nullptr,
-                               const std::set<std::string>& alsoForms = {}) {   // forms I co-own
+                               const std::set<std::string>& alsoForms = {},     // forms I co-own
+                               std::function<long long(const std::string&)> netTime = nullptr) {
+    // ADR 0019 (mirror engine.mjs): netTime(eventId) = the earliest Logos Delivery timestamp (ms)
+    // seen for that answer, <= 0 = none. With it, close/expiry/cap/edit rules use the network's
+    // time; an answer with none keeps its HLC and is marked timeVerified:false.
     const std::string ident = lc(identity);
     const auto& forms = state["forms"];
 
@@ -488,8 +496,38 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
     struct EditMeta { long long firstWall = 0; std::string cid; long long index = -1; };
     std::map<std::string, std::map<std::string, EditMeta>> seenRespondent; // formId → respondent → first answer
 
-    const auto& pool = state["responses"];   // HLC-ordered (fold invariant)
-    for (const auto& blob : pool) {
+    struct When { long long wall = 0; bool net = false; };
+    auto whenOf = [&](const OrderedJson& blob) {
+        When w;
+        long long t = netTime && blob.contains("id") && blob["id"].is_string() ? netTime(blob["id"].get<std::string>()) : 0;
+        if (t > 0) { w.wall = t; w.net = true; }
+        else w.wall = blob.contains("hlc") && blob["hlc"].contains("wall") && blob["hlc"]["wall"].is_number() ? blob["hlc"]["wall"].get<long long>() : 0;
+        return w;
+    };
+    // at or after a creator-signed HLC: network time by wall clock, a claimed time as before
+    auto atOrAfter = [&](const When& w, const OrderedJson& blob, const OrderedJson& h) {
+        if (w.net) return w.wall >= (h.contains("wall") && h["wall"].is_number() ? h["wall"].get<long long>() : 0LL);
+        return compareHlc(blob["hlc"], h) >= 0;
+    };
+    const auto& rawPool = state["responses"];   // HLC-ordered (fold invariant)
+    std::vector<const OrderedJson*> pool;
+    for (const auto& b : rawPool) pool.push_back(&b);
+    if (netTime) {   // earliest network time first (stable: HLC order breaks ties)
+        std::vector<std::pair<long long, const OrderedJson*>> k;
+        for (auto* b : pool) k.push_back({whenOf(*b).wall, b});
+        std::stable_sort(k.begin(), k.end(), [](const auto& x, const auto& y) { return x.first < y.first; });
+        for (size_t i = 0; i < k.size(); i++) pool[i] = k[i].second;
+    }
+    for (const OrderedJson* blobp : pool) {
+      const OrderedJson& blob = *blobp;
+      const When w = whenOf(blob);
+      auto timeFields = [&](OrderedJson& o) {
+          if (!netTime) return;
+          o["timeVerified"] = w.net;
+          o["receivedAt"] = w.net ? json(w.wall) : json(nullptr);
+          if (w.net && o.contains("submittedAt") && o["submittedAt"].is_number()
+              && std::llabs(o["submittedAt"].get<long long>() - w.wall) > kMaxTimeSkewMs) o["timeSkew"] = true;
+      };
       // A respondent controls the decrypted JSON: a malformed field (e.g. "respondent": null)
       // must drop that one answer, never throw out of the whole creator view.
       try {
@@ -506,21 +544,21 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
             // sealed while the form was closed - any closed period, even if re-opened since
             bool inClosed = false;
             for (const auto& s : *spans)
-                if (compareHlc(blob["hlc"], s["from"]) >= 0 && (s["to"].is_null() || compareHlc(blob["hlc"], s["to"]) < 0)) { inClosed = true; break; }
+                if (atOrAfter(w, blob, s["from"]) && (s["to"].is_null() || !atOrAfter(w, blob, s["to"]))) { inClosed = true; break; }
             if (inClosed) { drop(dropped, "form-closed"); continue; }
         } else if (f["status"].get<std::string>() == "closed") {
             // Closed-form drop: blob's HLC after the close event's HLC. Cross-device
             // HLC comparison is approximate (clock skew) — best-effort, documented.
             bool afterClose = true;
             if (state.contains("closeHlc") && state["closeHlc"].contains(formId))
-                afterClose = compareHlc(blob["hlc"], state["closeHlc"][formId]) >= 0;
+                afterClose = atOrAfter(w, blob, state["closeHlc"][formId]);
             else afterClose = true;   // no close hlc recorded → treat as closed
             if (afterClose) { drop(dropped, "form-closed"); continue; }
         }
 
         // Close-at date (expiresAt, ms): answers stamped after it don't count.
-        if (f.contains("expiresAt") && f["expiresAt"].is_number() && blob["hlc"].contains("wall")
-            && blob["hlc"]["wall"].get<double>() > f["expiresAt"].get<double>()) { drop(dropped, "expired"); continue; }
+        if (f.contains("expiresAt") && f["expiresAt"].is_number()
+            && (double)w.wall > f["expiresAt"].get<double>()) { drop(dropped, "expired"); continue; }
 
         // Inner signature (ADR 0019, mirror engine.mjs): every answer from 0.5.0 is signed by the
         // respondent it names. Bad signature: dropped. Unsigned: dropped on members-only and editable
@@ -553,6 +591,7 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
                 u["confirmationId"] = dec.contains("confirmationId") && dec["confirmationId"].is_string() ? dec["confirmationId"] : json(nullptr);
                 u["hlc"] = blob["hlc"];
                 u["verified"] = false;
+                timeFields(u);
                 respObj[formId].push_back(u);
                 continue;
             }
@@ -574,9 +613,9 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
             EditMeta& pm = prevIt->second;
             if (!allowEdits || pm.index < 0) { drop(dropped, "duplicate-respondent"); continue; }
             const long long win = (f["editWindowMinutes"].is_number() ? f["editWindowMinutes"].get<long long>() : 15) * 60000LL;
-            if (blob["hlc"].value("wall", 0LL) - pm.firstWall > win) { drop(dropped, "edit-too-late"); continue; }
+            if (w.wall - pm.firstWall > win) { drop(dropped, "edit-too-late"); continue; }
             if (state.contains("receiptHlc") && state["receiptHlc"].contains(formId) && !pm.cid.empty()
-                && state["receiptHlc"][formId].contains(pm.cid) && compareHlc(blob["hlc"], state["receiptHlc"][formId][pm.cid]) >= 0) { drop(dropped, "edit-after-receipt"); continue; }
+                && state["receiptHlc"][formId].contains(pm.cid) && atOrAfter(w, blob, state["receiptHlc"][formId][pm.cid])) { drop(dropped, "edit-after-receipt"); continue; }
             auto& e = respObj[formId][(size_t)pm.index];
             e["submittedAt"] = dec.contains("submittedAt") && !dec["submittedAt"].is_null() ? dec["submittedAt"] : json(nullptr);
             e["answers"] = dec.value("answers", json::array());
@@ -585,7 +624,7 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
             if (isReplyPub(dec)) e["replyPub"] = lc(dec["replyPub"].get<std::string>());
             continue;
         }
-        EditMeta meta; meta.firstWall = blob["hlc"].value("wall", 0LL);
+        EditMeta meta; meta.firstWall = w.wall;
         meta.cid = dec.contains("confirmationId") && dec["confirmationId"].is_string() ? dec["confirmationId"].get<std::string>() : "";
         seen[respondent] = meta;
         // Answer cap: the first maxResponses in HLC order count (same on every replica).
@@ -605,6 +644,7 @@ inline OrderedJson creatorView(const OrderedJson& state, const std::string& iden
         if (isReplyPub(dec)) r["replyPub"] = lc(dec["replyPub"].get<std::string>());
         if (allowEdits) r["edits"] = 0;   // only on editable forms (keeps older vectors stable)
         if (verifyResponse) r["verified"] = true;   // ADR 0019 (only with a verifier, as engine.mjs)
+        timeFields(r);
         seen[respondent].index = (long long)respObj[formId].size();
         respObj[formId].push_back(r);
       } catch (const std::exception&) { drop(dropped, "malformed"); }

@@ -91,7 +91,10 @@ private:
     bool deliverySend(const std::string& topic, const std::string& b64Text);
 
     // --- ingest (receive path) ---
-    void ingestEnvelopeText(const std::string& text, bool channelPath);
+    // netMs: the network (Logos Delivery) timestamp of the frame in ms, 0 = none (ADR 0019)
+    void ingestEnvelopeText(const std::string& text, bool channelPath, long long netMs);
+    bool noteNetTime(const whisperbox::json& e, long long netMs);
+    void saveNetTimes();
     bool admitEvent(const whisperbox::json& e);
 
     // --- state / snapshot ---
@@ -141,6 +144,9 @@ private:
     long m_rxRaw = 0, m_rxSeen = 0, m_rxNew = 0, m_rxDup = 0, m_txTotal = 0;
     long m_admDropSig = 0, m_admDropType = 0;
     long m_admDropShape = 0, m_admDropFuture = 0, m_rxBad = 0, m_loadDropped = 0;   // review 2026-10-22 (WB-1/WB-3)
+    long m_netTs = 0;   // answers whose network time was recorded or moved earlier
+    // answer event id -> earliest Logos Delivery timestamp (ms) seen for it (ADR 0019); nettime.json
+    std::map<std::string, long long> m_netTimes;
 
     int64_t m_lastSyncReserveMs = 0;      // SYNC_REQ-driven re-serve throttle (3s)
     int64_t m_lastSeedMs = 0;             // periodic seed throttle (60s)

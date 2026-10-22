@@ -26,6 +26,7 @@ struct FakeNode {
 struct FakeBus {
     std::vector<FakeNode*> nodes;
     long dropped = 0;
+    long long tsNs = 0;   // the network timestamp every frame carries (ns, 0 = none), as loam_core >= 0.8.0
     static FakeBus& get() { static FakeBus b; return b; }
     static std::string b64(const std::string& s) {
         std::string out(4 * ((s.size() + 2) / 3) + 1, '\0');
@@ -46,9 +47,10 @@ struct FakeBus {
             if ((n == from && !selfToo) || !n->up || !n->online || !n->onRx || !n->joined.count(topic)) continue;
             if (from && n->senderId == from->senderId) { dropped++; continue; }
             long serial = n->serial;
-            later([serial, topic, sid, raw] {
+            long long ts = tsNs;
+            later([serial, topic, sid, raw, ts] {
                 FakeNode* nn = FakeBus::get().alive(serial);
-                if (nn && nn->online && nn->onRx) { nn->rx++; auto fn = nn->onRx; fn(topic, sid, b64(raw), 0); }
+                if (nn && nn->online && nn->onRx) { nn->rx++; auto fn = nn->onRx; fn(topic, sid, b64(raw), ts); }
             });
         }
     }

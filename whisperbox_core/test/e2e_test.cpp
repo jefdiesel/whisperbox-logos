@@ -838,6 +838,35 @@ int main(int argc, char** argv) {
                   "A counts B's signed answer, not the earlier forged one");
             CHECK(verifiedOf(false).size() == 1 && verifiedOf(false)[0]["answers"][0].value("value", "") == "FAKE", "the forged answer is kept, marked unverified");
         }
+        // ADR 0019: the close is judged by the network's timestamp of an answer, not its own HLC
+        {
+            json fc = A->call(A->core->createForm(json({{"title", "deadline"}, {"questions", json::array({{{"id", "q"}, {"type", "shortText"}, {"text", "x"}, {"required", true}}})}}).dump()));
+            std::string fcid = fc.value("formId", "");
+            std::string fpub = formOf(*A, fcid).value("publicKey", "");
+            const long long t0 = (long long)QDateTime::currentMSecsSinceEpoch();
+            pump(50);
+            CHECK(A->call(A->core->closeForm(fcid)).value("ok", false), "A closes the deadline form");
+            json body = {{"formId", fcid}, {"respondent", "0x" + std::string(40, '7')}, {"submittedAt", t0 - 30000}, {"answers", json::array({{{"questionId", "q"}, {"value", "backdated"}}})}, {"signature", nullptr}, {"pub", nullptr}};
+            std::string btxt = body.dump();
+            std::string sealedHex = whisperbox::toHex(whisperbox::eciesSeal(whisperbox::fromHex(fpub), whisperbox::Bytes(btxt.begin(), btxt.end())));
+            json ev = {{"v", 1}, {"id", whisperbox::responseSubmitId(sealedHex)}, {"type", "response.submit"}, {"hlc", {{"wall", t0 - 30000}, {"ctr", 0}, {"dev", "wb-x"}}},
+                       {"dev", "wb-x"}, {"payload", {{"encryptedPayload", sealedHex}}}};
+            const std::string frame = json({{"v", 1}, {"type", "EVENT"}, {"event", ev}}).dump();
+            const long long net0 = diag(*A, "netTs");
+            FakeBus::get().tsNs = ((long long)QDateTime::currentMSecsSinceEpoch() + 1000) * 1000000LL;   // the network had it after the close
+            send(frame); pump(300);
+            CHECK(responsesOf(*A, fcid).empty(), "an answer stamped before the close but published after it is out");
+            CHECK(diag(*A, "netTs") == net0 + 1, "its network time was recorded");
+            FakeBus::get().tsNs = (t0 - 20000) * 1000000LL;   // the store's copy: published before the close
+            send(frame); pump(300);
+            CHECK(responsesOf(*A, fcid).size() == 1 && responsesOf(*A, fcid)[0].value("timeVerified", false), "an earlier copy puts it before the close, time verified");
+            FakeBus::get().tsNs = (t0 + 90000) * 1000000LL;   // re-served later: doesn't move it back
+            send(frame); pump(300);
+            CHECK(responsesOf(*A, fcid).size() == 1 && responsesOf(*A, fcid)[0].value("receivedAt", 0LL) == t0 - 20000, "a later copy doesn't move it back");
+            FakeBus::get().tsNs = 0;
+            A->stop(); A->start(); pump(200);
+            CHECK(responsesOf(*A, fcid).size() == 1 && responsesOf(*A, fcid)[0].value("receivedAt", 0LL) == t0 - 20000, "network times survive a restart");
+        }
     }
 
     std::printf("\n%d/%d checks passed\n", checks - failures, checks);

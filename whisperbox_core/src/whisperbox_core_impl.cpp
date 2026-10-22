@@ -36,6 +36,14 @@ static long long nowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
+// A frame's network timestamp (ns, as loam_core passes it) in ms, or 0: none, nonsense, or further
+// ahead of our clock than an HLC may be (mirror client.mjs netMsOf).
+static long long netMsOf(long long tsNs, long long now) {
+    if (tsNs <= 1000000000000000LL) return 0;
+    const long long ms = tsNs / 1000000LL;
+    if (ms <= 1000000000000LL || ms > now + whisperbox::kMaxClockLeadMs) return 0;
+    return ms;
+}
 static std::string trim(const std::string& s) {
     size_t a = s.find_first_not_of(" \t\r\n"); if (a == std::string::npos) return "";
     size_t b = s.find_last_not_of(" \t\r\n"); return s.substr(a, b - a + 1);
@@ -389,7 +397,12 @@ void WhisperboxCoreImpl::loadMySubmissions() {
     } catch (...) { /* ignore */ }
 }
 void WhisperboxCoreImpl::loadLocalPrefs() {
-    m_hidden.clear(); m_myAnswers.clear(); m_drafts.clear(); m_answerDrafts.clear(); m_autoReceipts.clear(); m_seen.clear();
+    m_hidden.clear(); m_myAnswers.clear(); m_drafts.clear(); m_answerDrafts.clear(); m_autoReceipts.clear(); m_seen.clear(); m_netTimes.clear();
+    try {
+        std::ifstream nt(m_dataDir + "/nettime.json");
+        if (nt) { json o = json::parse(std::string((std::istreambuf_iterator<char>(nt)), std::istreambuf_iterator<char>()));
+                  if (o.is_object()) for (auto it = o.begin(); it != o.end(); ++it) if (it.value().is_number_integer() && it.value().get<long long>() > 0) m_netTimes[it.key()] = it.value().get<long long>(); }
+    } catch (...) { /* ignore */ }
     try {
         std::ifstream sn(m_dataDir + "/seen.json");
         if (sn) { json o = json::parse(std::string((std::istreambuf_iterator<char>(sn)), std::istreambuf_iterator<char>()));
@@ -474,11 +487,15 @@ void WhisperboxCoreImpl::bootstrapDelivery() {
     try {
         // Callbacks arrive on the IPC thread. Never call a module from inside one (each call would
         // wait out the IPC timeout): hand the work to this module's thread.
-        modules().loam_core.onReceived([this](const std::string& topic, const std::string&, const std::string& payloadB64, int64_t) {
+        modules().loam_core.onReceived([this](const std::string& topic, const std::string&, const std::string& payloadB64, int64_t ts) {
             if (topic != TOPIC) return;
+            // ts: the message's network timestamp in ns (loam_core >= 0.8.0: 0 = none, and an
+            // earlier-stamped duplicate is delivered again). Older loam_core passes the WakuMessage
+            // time on this relay path too. Any of them bounds when the answer existed (ADR 0019).
+            const long long netMs = netMsOf(ts, nowMs());
             // as the old receive path did: the payload still base64'd; the ingest peels one or two
             // layers (phones send base64(envelope) or the raw envelope)
-            onLoop([this, payloadB64] { ingestEnvelopeText(payloadB64, /*channelPath=*/true); });
+            onLoop([this, payloadB64, netMs] { ingestEnvelopeText(payloadB64, /*channelPath=*/true, netMs); });
         });
         modules().loam_core.onStatusChanged([this](const std::string& st) { onLoop([this, st] { onTransportStatus(st); }); });
         modules().loam_core.setSenderIdAsync(m_deviceId, [](std::string) {});
@@ -600,13 +617,13 @@ void WhisperboxCoreImpl::broadcastEvent(const json& e) {
 }
 
 // ── ingest (receive path) ────────────────────────────────────────────────────────
-void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channelPath) try {
+void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channelPath, long long netMs) try {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     m_rxRaw++;
     if (channelPath) m_rxSeen++;
     // The wire payload is base64 text; a peer may single- OR double-encode. Try the
     // double-peel first, then a single peel (qaku convention).
-    auto tryText = [this](const std::string& t) -> bool {
+    auto tryText = [this, netMs](const std::string& t) -> bool {
         json env = whisperbox::parseEnvelope(t);
         if (!env.is_object() || !env.contains("type") || !env["type"].is_string()) return false;
         const std::string type = env["type"].get<std::string>();
@@ -639,13 +656,14 @@ void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channe
         if (type == "EVENT" && env.contains("event")) {
             json e = env["event"];
             if (!admitEvent(e)) return true;   // dropped by admission (counted), not a decode failure
+            const bool earlier = noteNetTime(e, netMs);
             bool isNew = whisperbox::mergeOne(m_log, e);
             if (isNew) {
                 m_rxNew++;
                 m_clock.receive(e["hlc"], nowMs() + whisperbox::kMaxClockLeadMs);
                 saveLog();
                 publishState();
-            } else m_rxDup++;
+            } else { m_rxDup++; if (earlier) publishState(); }
             return true;
         }
         return false;
@@ -662,6 +680,24 @@ void WhisperboxCoreImpl::ingestEnvelopeText(const std::string& text, bool channe
 } catch (...) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     m_rxBad++;
+}
+
+// ADR 0019: keep the earliest network time per answer. A copy re-served during catch-up is published
+// again (a later time) and a store copy keeps the original, so the earliest is the closest to when the
+// respondent sent it. True when it moved earlier.
+bool WhisperboxCoreImpl::noteNetTime(const json& e, long long netMs) {
+    if (netMs <= 0 || e.value("type", "") != RESPONSE_SUBMIT) return false;
+    const std::string id = e.value("id", "");
+    auto it = m_netTimes.find(id);
+    if (it != m_netTimes.end() && it->second <= netMs) return false;
+    m_netTimes[id] = netMs;
+    m_netTs++;
+    saveNetTimes();
+    return true;
+}
+void WhisperboxCoreImpl::saveNetTimes() {
+    json o = json::object(); for (auto& kv : m_netTimes) o[kv.first] = kv.second;
+    writeAtomic(m_dataDir + "/nettime.json", o.dump());
 }
 
 // Admission gates at merge (PLAN 3.4): drop violators, counted, not fatal.
@@ -819,7 +855,7 @@ OrderedJson WhisperboxCoreImpl::buildSnapshot() {
     snap["mySubmissions"] = subArr;
     snap["diagnostics"] = json({
         {"rxRaw", m_rxRaw}, {"rxSeen", m_rxSeen}, {"rxNew", m_rxNew}, {"rxDup", m_rxDup},
-        {"txTotal", m_txTotal}, {"admDropSig", m_admDropSig}, {"admDropType", m_admDropType}, {"admDropShape", m_admDropShape}, {"admDropFuture", m_admDropFuture}, {"rxBad", m_rxBad}, {"loadDropped", m_loadDropped},
+        {"txTotal", m_txTotal}, {"admDropSig", m_admDropSig}, {"admDropType", m_admDropType}, {"admDropShape", m_admDropShape}, {"admDropFuture", m_admDropFuture}, {"rxBad", m_rxBad}, {"loadDropped", m_loadDropped}, {"netTs", m_netTs},
         {"rbsrRx", m_rbsrRx}, {"legacyReseeds", m_legacyReseeds},
     });
     return snap;
@@ -887,7 +923,8 @@ OrderedJson WhisperboxCoreImpl::decryptView(const OrderedJson& state) {
         m_openCache[hexBlob] = Opened{dec, keys.size()};
         return dec;
     };
-    return whisperbox::creatorView(state, m_signId.address, open, verifyInnerResponse, also);
+    auto netTime = [this](const std::string& id) -> long long { auto n = m_netTimes.find(id); return n == m_netTimes.end() ? 0 : n->second; };
+    return whisperbox::creatorView(state, m_signId.address, open, verifyInnerResponse, also, netTime);
 }
 
 json WhisperboxCoreImpl::quizOf(const OrderedJson& f, const std::map<std::string, const whisperbox::SignId*>& keys) {

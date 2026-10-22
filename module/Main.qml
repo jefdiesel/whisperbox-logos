@@ -265,6 +265,12 @@ Item {
     function toList(v) { return isList(v) ? Array.prototype.slice.call(v) : []; }
     function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
     function shortAddr(a) { if (!a) return "-"; return a.length > 14 ? a.substr(0, 6) + "..." + a.substr(-4) : a; }
+    function answerTimeText(r) {
+        if (!r) return "";
+        if (r.timeVerified === true) return root.fmtTime(r.receivedAt) + (r.timeSkew ? "  (sender's clock says " + root.fmtTime(r.submittedAt) + ")" : "");
+        if (r.timeVerified === false) return root.fmtTime(r.submittedAt) + "  (time not verified)";
+        return root.fmtTime(r.submittedAt);
+    }
     function fmtTime(ms) { if (!ms) return ""; return Qt.formatDateTime(new Date(Number(ms)), "d MMM yyyy, hh:mm"); }
     function normType(t) {
         var s = String(t);
@@ -1537,7 +1543,8 @@ Item {
                                             // ADR 0019: an unsigned answer (older client, or someone claiming this address) proves nothing
                                             Text { textFormat: Text.PlainText; text: oneNav.r ? root.shortAddr(oneNav.r.respondent) + (oneNav.r.verified === false ? "  unverified: not signed, could be from anyone" : "") : ""; font.pixelSize: 12; font.family: "monospace"; color: oneNav.r && oneNav.r.verified === false ? root.wbWarning : root.wbTextSec
                                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.copyText(oneNav.r.respondent, "Address") } }
-                                            Text { textFormat: Text.PlainText; text: oneNav.r ? root.fmtTime(oneNav.r.submittedAt) : ""; font.pixelSize: 11; color: root.wbTextTert }
+                                            // ADR 0019: when the network had it (deadlines use that), or the sender's own claim
+                                            Text { textFormat: Text.PlainText; text: root.answerTimeText(oneNav.r); font.pixelSize: 11; color: oneNav.r && oneNav.r.timeSkew ? root.wbWarning : root.wbTextTert }
                                             Item { Layout.fillWidth: true }
                                             Badge { visible: !!(oneNav.r && oneNav.r.outOf !== undefined); label: "Score " + root.scoreText(oneNav.r); fg: root.wbSuccess; bg: root.wbSuccessSubtle }
                                             Badge { visible: !!(oneNav.r && oneNav.r.replies > 0); label: oneNav.r ? root.plural(oneNav.r.replies, "reply", "replies") + " sent" : ""; fg: root.wbPrimary; bg: root.wbPrimarySubtle }

@@ -539,6 +539,13 @@ function QuestionInput({ q, n, value, onChange, error, order }: { q: any; n: num
   );
 }
 
+// ADR 0019: when the network had the answer (deadlines use that), or the sender's own claim
+function answerTime(r: any): string {
+  if (r?.timeVerified === true) return fmtTime(r.receivedAt) + (r.timeSkew ? " (sender's clock: " + fmtTime(r.submittedAt) + ")" : "");
+  if (r?.timeVerified === false) return fmtTime(r.submittedAt) + " (time not verified)";
+  return fmtTime(r?.submittedAt);
+}
+
 // ── Form (creator + respondent) ─────────────────────────────────────────────────
 function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string; preview?: any }) {
   // preview: the builder's form exactly as respondents see it; nothing is ever sent
@@ -829,7 +836,7 @@ function FormScreen({ snap, pop, push, toast, id, preview }: Ctx & { id: string;
                   <View style={st.card}>
                     <View style={st.cardHead}>
                       <Pressable onPress={async () => { await Clipboard.setStringAsync(cur.respondent); toast("Address copied"); }}><Text style={st.addr}>{shortAddr(cur.respondent)}</Text></Pressable>
-                      <Text style={st.time}>{fmtTime(cur.submittedAt)}</Text>
+                      <Text style={[st.time, cur.timeSkew && { color: C.warn }]}>{answerTime(cur)}</Text>
                       <View style={{ flex: 1 }} />
                       {cur.outOf !== undefined ? <Badge label={scoreText(cur)} fg={C.ok} bg={C.okSubtle} /> : null}
                       {cur.replies > 0 ? <Badge label={`${plural(cur.replies, "reply", "replies")}`} fg={C.primary} bg={C.primarySubtle} /> : null}

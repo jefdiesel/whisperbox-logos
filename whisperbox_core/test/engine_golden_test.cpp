@@ -114,6 +114,16 @@ int main(int argc, char** argv) {
             json cv = json::parse(creatorView(cs, lf["coOwner"].get<std::string>(), openC, verifyInner, {"shared"}).dump());
             CHECK(cv == json::parse(lf["coView"].dump()), "co-owner view (alsoForms) == TS");
         }
+        {   // ADR 0019: the same log judged by the network's time
+            std::vector<json> log; for (auto& e : evs) mergeOne(log, e);
+            OrderedJson st = computeState(log, creator);
+            std::map<std::string, long long> nets;
+            for (auto it = lf["netTime"].begin(); it != lf["netTime"].end(); ++it) nets[it.key()] = it.value().get<long long>();
+            auto netTime = [&](const std::string& id) -> long long { auto n = nets.find(id); return n == nets.end() ? 0 : n->second; };
+            json nv = json::parse(creatorView(st, creator, openC, verifyInner, {}, netTime).dump());
+            if (nv != json::parse(lf["netView"].dump())) std::printf("    got: %.800s\n", nv.dump().c_str());
+            CHECK(nv == json::parse(lf["netView"].dump()), "network-time view (close, re-open, cap, close-at, edit window, skew) == TS");
+        }
         std::vector<std::string> ids = {"c-life-350", "c-life-150"};
         bool idOk = false;
         for (auto& e : lf["log"]) if (e["id"].get<std::string>().rfind("confirm:life:b:", 0) == 0) idOk = e["id"] == responseConfirmBatchId("life", ids);
