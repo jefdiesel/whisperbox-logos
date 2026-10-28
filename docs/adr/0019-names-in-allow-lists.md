@@ -1,11 +1,11 @@
-# ADR 0019 — Logos names in members-only lists, resolved to addresses at publish
+# ADR 0019 — LNS names in members-only lists, resolved to addresses at publish
 
 Status: proposed (desktop view). Recorded 2026-10-28.
 
 ## Context
 A members-only form lists respondent addresses (`whitelist.type = "addresses"`). The
-creator has to collect a `0x` address from every person first, out of band. Logos names
-(LNS, `.lez` names on the LEZ testnet, the optional `names` Basecamp module) give people a
+creator has to collect a `0x` address from every person first, out of band. LNS names
+(looked up through the optional `names` Basecamp module) give people a
 name others can look up, with text entries the holder sets.
 
 ## Decision
@@ -13,7 +13,7 @@ name others can look up, with text entries the holder sets.
   WhisperBox address. Only the name's holder can set it, so the entry is the proof. The
   Identity screen shows the `names set-text` command with this device's address.
 - In the builder's allow-list an entry starting with `0x` is an address, as before; any
-  other entry is a name (`alice` or `alice.lez`).
+  other entry is an LNS name (`alice`; a trailing `.lez` is ignored).
 - The creator's view resolves the names through `names.resolve` when publishing, saving an
   edit or scheduling, and puts only the addresses into the form. A name that is not
   registered, has no valid linked address, or can't be looked up (no `names` module) stops

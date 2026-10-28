@@ -2,7 +2,7 @@
 
 ## Unreleased (desktop view)
 
-- **Logos names in members-only lists**: the allow-list takes `.lez` names as well as
+- **LNS names in members-only lists**: the allow-list takes LNS names as well as
   addresses. The view looks each name up in the optional `names` module and publishes only
   the address the name links in its `whisperbox.address` entry; an unregistered or unlinked
   name stops the publish instead of being dropped. The Identity screen shows the command to

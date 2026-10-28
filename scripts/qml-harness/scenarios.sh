@@ -50,11 +50,11 @@ run create-publish   creator   '{"draftTitle":"Team offsite","draftDescription":
 expect 'CALL whisperbox_core createForm argc=1 args=\{"title":"Team offsite","description":"Where next\?","questions":\[\{"id":"q1","type":"radioButtons","text":"Place","required":true,"options":\["Alps","Sea"\]\},\{"id":"q2","type":"textarea","text":"Why\?","required":false\}\],"whitelist":\{"type":"addresses","value":"0x1111111111111111111111111111111111111111"\}\}$' "publish -> createForm(def) with options + filtered allow-list"
 deny 'CALL names' "an address-only list never asks Names"
 
-# ── Logos names in the allow-list (ADR 0019) ──
+# ── LNS names in the allow-list (ADR 0019) ──
 NAMEQ='"draftQuestions":[{"type":"text","text":"Q","required":false,"optionsText":""}]'
 NAMES='{"alice":{"texts":{"whisperbox.address":"0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}},"bob":{"texts":{"whisperbox.address":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}},"carol":{"texts":{"avatar":"x"}}}'
 WB_NAMES="$NAMES" run names-publish creator "{\"draftTitle\":\"N\",\"draftRestrict\":true,\"draftAllowList\":\"alice.lez\\n0x2222222222222222222222222222222222222222\\nBob, alice\",$NAMEQ}" "doCreate"
-expect 'CALL names resolve argc=1 args=alice$' "alice.lez is looked up as alice"
+expect 'CALL names resolve argc=1 args=alice$' "a trailing .lez is ignored (alice.lez is looked up as alice)"
 expect 'CALL names resolve argc=1 args=bob$' "names are lower-cased"
 expect '"whitelist":\{"type":"addresses","value":"0x2222222222222222222222222222222222222222,0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"\}' "names become their linked addresses, de-duplicated"
 deny 'CALL whisperbox_core createForm.*(alice|bob)' "no name goes on the wire"

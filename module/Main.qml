@@ -113,8 +113,8 @@ Item {
         }
         Qt.callLater(function () { var r = ""; try { r = logos.callModule("whisperbox_core", m, a || []); } catch (e) {} done(r); });
     }
-    // ── Logos names (optional `names` module, ADR 0019) ──
-    // A members-only list may name people (alice or alice.lez) as well as give addresses.
+    // ── LNS names (optional `names` module, ADR 0019) ──
+    // A members-only list may name people by their LNS name as well as give addresses.
     // Each person links once: their name's `whisperbox.address` entry holds their address.
     // The creator's view resolves names when publishing; only addresses go into the form.
     readonly property string nameAddressKey: "whisperbox.address"
@@ -153,11 +153,11 @@ Item {
                 var r = root.parse(raw);
                 if (!r || r.success === undefined) missing = true;
                 else if (!r.success) problems.push(n + ": " + (r.error || "lookup failed"));
-                else if (!r.value || r.value.name !== n) problems.push(n + ".lez isn't a registered name");
+                else if (!r.value || r.value.name !== n) problems.push(n + " isn't a registered LNS name");
                 else {
                     var v = String((r.value.texts || {})[root.nameAddressKey] || "").trim();
                     if (isAddress(v)) addrs.push(v.toLowerCase());
-                    else problems.push(n + ".lez hasn't linked a WhisperBox address");
+                    else problems.push(n + " hasn't linked a WhisperBox address to its LNS name");
                 }
                 if (--left > 0) return;
                 if (missing) problems.unshift("Names didn't answer (is the Names app installed?), so names can't be looked up - use 0x addresses");
@@ -2178,7 +2178,7 @@ Item {
                 color: root.wbTextTert
                 text: "Creators who restrict a form to specific addresses need this one. It is an Ethereum-style address of this device's key."
             }
-            SectionLabel { text: "LINK YOUR LOGOS NAME (OPTIONAL)" }
+            SectionLabel { text: "LINK YOUR LNS NAME (OPTIONAL)" }
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 8
@@ -2193,7 +2193,7 @@ Item {
                         placeholderTextColor: root.wbTextTert
                         font.pixelSize: 12
                         background: null
-                        placeholderText: "your name, e.g. alice.lez"
+                        placeholderText: "your LNS name, e.g. alice"
                         text: root.linkName
                         onTextChanged: root.linkName = text
                     }
@@ -2628,7 +2628,7 @@ Item {
                                 font.family: "monospace"
                                 wrapMode: TextEdit.Wrap
                                 background: null
-                                placeholderText: "0x addresses or Logos names (alice.lez), one per line (respondents find theirs under Identity)"
+                                placeholderText: "0x addresses or LNS names, one per line (respondents find theirs under Identity)"
                                 text: root.draftAllowList
                                 onTextChanged: root.draftAllowList = text
                             }
