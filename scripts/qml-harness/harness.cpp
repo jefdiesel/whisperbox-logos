@@ -92,7 +92,11 @@ public:
         const QString r = callModule(mod, method, args);
         if (mod == "names" && qgetenv("WB_NAMES") == "silent") return;   // a host that never calls back
         QJSValue c = cb;
-        QTimer::singleShot(0, this, [c, r]() mutable { if (c.isCallable()) c.call({QJSValue(r)}); });
+        const bool names = mod == "names";   // replies are logged too, so a scenario can check the call order
+        QTimer::singleShot(0, this, [c, r, names, method]() mutable {
+            if (names) fprintf(stderr, "REPLY names %s\n", method.toUtf8().constData());
+            if (c.isCallable()) c.call({QJSValue(r)});
+        });
     }
     Q_INVOKABLE void onModuleEvent(const QString &mod, const QString &ev) {}
 

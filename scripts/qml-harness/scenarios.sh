@@ -29,6 +29,8 @@ run() {
     else echo "ok:   $name"; fi
     LAST="$OUT/$name.log"
 }
+# order <expected> <label>: the names CALL/REPLY sequence of the last run, e.g. "CALL REPLY CALL REPLY"
+order() { local got; got=$(grep -oE '^(CALL|REPLY) names' "$LAST" | cut -d' ' -f1 | tr '\n' ' ' | sed 's/ $//'); if [ "$got" = "$1" ]; then echo "      + $2"; else echo "FAIL:   $2 (got: $got)"; FAIL=1; fi; }
 expect() { if grep -qE "$1" "$LAST"; then echo "      + $2"; else echo "FAIL:   $2 (no match: $1)"; grep '^CALL' "$LAST" | head -5; FAIL=1; fi; }
 deny()   { if grep -qE "$1" "$LAST"; then echo "FAIL:   $2"; grep '^CALL' "$LAST" | head -5; FAIL=1; else echo "      + $2"; fi; }
 
@@ -67,6 +69,22 @@ expect 'CALL names resolve' "Names is asked"
 deny 'CALL whisperbox_core createForm' "without Names, a list with names isn't published"
 WB_NAMES="$NAMES" run names-schedule creator "{\"draftTitle\":\"Later\",\"draftRestrict\":true,\"draftAllowList\":\"alice\",\"draftPublishAt\":\"2099-01-01 10:00\",$NAMEQ}" "doSchedule"
 expect 'CALL whisperbox_core saveDraft argc=1 args=.*"whitelist":\{"type":"addresses","value":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\}' "a scheduled form keeps the resolved address"
+WB_NAMES="$NAMES" run names-normalize creator "{\"draftTitle\":\"N\",\"draftRestrict\":true,\"draftAllowList\":\"  @Alice\\nLNS:bob\\nlns:@BOB.lez\",$NAMEQ}" "doCreate"
+expect 'CALL names resolve argc=1 args=alice$' "@ and case are dropped (@Alice -> alice)"
+expect 'CALL names resolve argc=1 args=bob$' "lns:, then @, then .lez are dropped"
+expect '"whitelist":\{"type":"addresses","value":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"\}' "the cleaned names publish"
+WB_NAMES="$NAMES" run names-invalid creator "{\"draftTitle\":\"N\",\"draftRestrict\":true,\"draftAllowList\":\"alice\\n-bad\\na_b\",$NAMEQ}" "doCreate"
+deny 'CALL names' "an invalid name stops the publish before any lookup"
+deny 'CALL whisperbox_core createForm' "and nothing is published"
+WB_NAMES="$NAMES" run names-serial creator "{\"draftTitle\":\"N\",\"draftRestrict\":true,\"draftAllowList\":\"alice\\nbob\\ncarol\",$NAMEQ}" "doCreate"
+order "CALL REPLY CALL REPLY CALL REPLY" "names are looked up one at a time"
+WB_NAMES="$NAMES" WB_DUMP=nameAddrs,allowListStatus run names-typing creator "{\"showCreate\":true,\"draftTitle\":\"N\",\"draftRestrict\":true,\"draftAllowList\":\"alice\\ndave\",$NAMEQ}" "prefetchNames"
+expect 'DUMP nameAddrs \{"alice":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\}' "names are looked up while the list is typed, before Publish"
+expect 'DUMP allowListStatus .*1 name found.*dave isn.t a registered LNS name' "the problem shows under the list"
+deny 'CALL whisperbox_core createForm' "typing doesn't publish"
+WB_NAMES="$NAMES" run names-prefetch creator "{\"showCreate\":true,\"draftTitle\":\"N\",\"draftRestrict\":true,\"draftAllowList\":\"alice\\nbob\",$NAMEQ}" "prefetchNames,doCreate"
+order "CALL REPLY CALL REPLY" "a name looked up while typing isn't asked again at Publish"
+expect '"whitelist":\{"type":"addresses","value":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"\}' "and Publish uses what it found"
 WB_NAMES=silent WB_DUMP=inFlight run names-silent creator "{\"namesTimeoutMs\":500,\"draftTitle\":\"N\",\"draftRestrict\":true,\"draftAllowList\":\"alice\",$NAMEQ}" "doCreate"
 expect 'DUMP inFlight \{\}' "a Names call that never answers doesn't leave publishing stuck"
 deny 'CALL whisperbox_core createForm' "and nothing is published"

@@ -6,7 +6,9 @@
   addresses. The view looks each name up in the optional `names` module and publishes only
   the address the name links in its `whisperbox.address` entry; an unregistered or unlinked
   name stops the publish instead of being dropped. The Identity screen shows the command to
-  link your name. No change to the core or the wire format (ADR 0019).
+  link your name. Names are cleaned up as the registry does it (`@alice`, `lns:alice`),
+  looked up one at a time with progress, and looked up as the list is typed, with problems
+  shown under it. No change to the core or the wire format (ADR 0019).
 
 ## 0.4.2 desktop view (2026-10-10) - macOS
 

@@ -131,63 +131,152 @@ Item {
     }
     function isAddress(t) { return /^0x[0-9a-fA-F]{40}$/.test(String(t)); }
     function allowEntries(text) { return String(text || "").split(/[\s,]+/).filter(function (t) { return t.length > 0; }); }
-    function nameOf(t) { var n = String(t).toLowerCase(); return n.slice(-4) === ".lez" ? n.slice(0, -4) : n; }
-    // cb({ ok, addrs }) or cb({ ok: false, error }). An entry starting with 0x is an address
-    // (kept if valid, as before); every other entry is a name, and a name that doesn't give
-    // an address fails the whole list rather than being dropped, or a typo would quietly
-    // shut that person out.
-    function resolveAllowList(text, cb) {
-        var addrs = [], names = [];
-        allowEntries(text).forEach(function (t) {
-            if (/^0x/i.test(t)) { if (isAddress(t)) addrs.push(t.toLowerCase()); }
-            else if (names.indexOf(nameOf(t)) < 0) names.push(nameOf(t));
+    // What a person typed, as a bare name, or "" if it isn't one. Exactly the registry's
+    // rules (LNS spec section 2): trim, lower ASCII letters only, drop one leading "lns:",
+    // then one leading "@", then one trailing ".lez"; the rest must be 1-32 of a-z, 0-9
+    // and "-", not starting or ending with "-". A copy, so checking costs no module call.
+    function nameOf(t) {
+        var n = String(t).trim().replace(/[A-Z]/g, function (c) { return c.toLowerCase(); });
+        if (n.indexOf("lns:") === 0) n = n.slice(4);
+        if (n.charAt(0) === "@") n = n.slice(1);
+        if (n.slice(-4) === ".lez") n = n.slice(0, -4);
+        return /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/.test(n) ? n : "";
+    }
+    function allowNames(text) {
+        var ns = [];
+        allowEntries(text).forEach(function (t) { if (!/^0x/i.test(t)) { var n = nameOf(t); if (n && ns.indexOf(n) < 0) ns.push(n); } });
+        return ns;
+    }
+    // Names are looked up one at a time: the module answers one call at a time (~0.4 s
+    // each), so a burst of parallel calls all wait on the last one and time out. Each call
+    // gets its own deadline. Found addresses are kept while the builder is open, and names
+    // are looked up as the list is typed, so most are done before Publish. Failures are
+    // shown under the list but never kept: Publish asks again.
+    property var nameAddrs: ({})      // name -> linked address
+    property var nameProblems: ({})   // name -> why it gives no address
+    property var nameQueue: []
+    property string nameAsking: ""
+    property bool namesMissing: false // Names didn't answer: the rest fail at once
+    property var nameWaiters: []      // called when the queue runs dry
+    property int namesGen: 0          // bumped when the builder is reset
+    property var namesFor: []         // the names the running Publish waits on
+    readonly property string namesMissingMsg: "Names didn't answer (is the Names app installed?), so names can't be looked up - use 0x addresses"
+    readonly property string namesProgress: {
+        var all = root.namesFor, a = root.nameAddrs, p = root.nameProblems;
+        if (!all.length) return "";
+        return all.filter(function (n) { return n in a || n in p; }).length + "/" + all.length;
+    }
+    function forgetNames() {
+        root.namesGen++; namesGuard.stop();
+        root.nameAddrs = ({}); root.nameProblems = ({}); root.nameQueue = []; root.nameAsking = ""; root.namesMissing = false;
+        var w = root.nameWaiters; root.nameWaiters = []; w.forEach(function (f) { f(); });
+    }
+    function askNames(list) {
+        var q = root.nameQueue.slice();
+        list.forEach(function (n) { if (!(n in root.nameAddrs) && !(n in root.nameProblems) && n !== root.nameAsking && q.indexOf(n) < 0) q.push(n); });
+        root.nameQueue = q; pumpNames();
+    }
+    function settleName(n, addr, problem) {
+        var a = Object.assign({}, root.nameAddrs), p = Object.assign({}, root.nameProblems);
+        if (addr) a[n] = addr; else p[n] = problem;
+        root.nameAddrs = a; root.nameProblems = p;
+    }
+    function pumpNames() {
+        if (root.nameAsking) return;
+        if (root.namesMissing) { root.nameQueue.forEach(function (n) { settleName(n, "", root.namesMissingMsg); }); root.nameQueue = []; }
+        if (root.nameQueue.length === 0) { var w = root.nameWaiters; root.nameWaiters = []; w.forEach(function (f) { f(); }); return; }
+        var n = root.nameQueue[0], gen = root.namesGen;
+        root.nameQueue = root.nameQueue.slice(1); root.nameAsking = n;
+        namesGuard.restart();
+        callNames("resolve", [n], function (raw) {
+            if (gen !== root.namesGen || root.nameAsking !== n) return;   // reset, or the guard gave up
+            namesGuard.stop();
+            var r = root.parse(raw);
+            if (!r || r.success === undefined) { root.namesMissing = true; settleName(n, "", root.namesMissingMsg); }
+            else if (!r.success) settleName(n, "", n + ": " + (r.error || "lookup failed"));
+            else if (!r.value || r.value.name !== n) settleName(n, "", n + " isn't a registered LNS name");
+            else {
+                var v = String((r.value.texts || {})[root.nameAddressKey] || "").trim();
+                if (isAddress(v)) settleName(n, v.toLowerCase(), "");
+                else settleName(n, "", n + " hasn't linked a WhisperBox address to its LNS name");
+            }
+            root.nameAsking = ""; pumpNames();
         });
-        var finish = function (problems) {
+    }
+    // Whatever the host does with a call's deadline, the queue never stays stuck on one name.
+    Timer { id: namesGuard; interval: root.namesTimeoutMs + 1000
+            onTriggered: { var n = root.nameAsking; if (!n) return; root.namesMissing = true; root.settleName(n, "", root.namesMissingMsg); root.nameAsking = ""; root.pumpNames(); } }
+    Timer { id: namesPrefetch; interval: 800; onTriggered: root.prefetchNames() }
+    onDraftAllowListChanged: namesPrefetch.restart()
+    onDraftRestrictChanged: namesPrefetch.restart()
+    function prefetchNames() {
+        if (!root.showCreate || !root.draftRestrict || root.draftAnonymous) return;
+        var ns = allowNames(root.draftAllowList);
+        if (ns.length) askNames(ns);
+    }
+    // One line under the list: names found, still looking, and every problem so far.
+    readonly property var allowListStatus: {
+        if (!root.draftRestrict) return { text: "", problem: false };
+        var a = root.nameAddrs, p = root.nameProblems, found = 0, waiting = 0, probs = [], seen = [];
+        allowEntries(root.draftAllowList).forEach(function (t) {
+            if (/^0x/i.test(t)) return;
+            var n = nameOf(t);
+            if (!n) { probs.push("\"" + t + "\" isn't a valid LNS name"); return; }
+            if (seen.indexOf(n) >= 0) return; seen.push(n);
+            if (n in a) found++; else if (n in p) { if (probs.indexOf(p[n]) < 0) probs.push(p[n]); } else waiting++;
+        });
+        var parts = [];
+        if (found) parts.push(found + (found === 1 ? " name found" : " names found"));
+        if (waiting) parts.push("looking up " + waiting + "...");
+        return { text: parts.concat(probs).join(" · "), problem: probs.length > 0 };
+    }
+    // cb({ ok, addrs }) or cb({ ok: false, error }) or cb({ cancelled: true }). An entry
+    // starting with 0x is an address (kept if valid, as before); every other entry is a
+    // name, and a name that isn't valid or doesn't give an address fails the whole list
+    // rather than being dropped, or a typo would quietly shut that person out.
+    function resolveAllowList(text, cb) {
+        var addrs = [], names = [], bad = [];
+        allowEntries(text).forEach(function (t) {
+            if (/^0x/i.test(t)) { if (isAddress(t)) addrs.push(t.toLowerCase()); return; }
+            var n = nameOf(t);
+            if (!n) bad.push("\"" + t + "\" isn't a valid LNS name");
+            else if (names.indexOf(n) < 0) names.push(n);
+        });
+        if (bad.length) { cb({ ok: false, error: bad.join("; ") }); return; }
+        var finish = function () {
+            var problems = [];
+            names.forEach(function (n) {
+                if (n in root.nameAddrs) addrs.push(root.nameAddrs[n]);
+                else { var m = root.nameProblems[n] || (n + ": lookup failed"); if (problems.indexOf(m) < 0) problems.push(m); }
+            });
             if (problems.length) { cb({ ok: false, error: problems.join("; ") }); return; }
             cb({ ok: true, addrs: addrs.filter(function (a, i) { return addrs.indexOf(a) === i; }) });
         };
-        if (names.length === 0) { finish([]); return; }
-        var left = names.length, problems = [], missing = false;
-        names.forEach(function (n) {
-            callNames("resolve", [n], function (raw) {
-                var r = root.parse(raw);
-                if (!r || r.success === undefined) missing = true;
-                else if (!r.success) problems.push(n + ": " + (r.error || "lookup failed"));
-                else if (!r.value || r.value.name !== n) problems.push(n + " isn't a registered LNS name");
-                else {
-                    var v = String((r.value.texts || {})[root.nameAddressKey] || "").trim();
-                    if (isAddress(v)) addrs.push(v.toLowerCase());
-                    else problems.push(n + " hasn't linked a WhisperBox address to its LNS name");
-                }
-                if (--left > 0) return;
-                if (missing) problems.unshift("Names didn't answer (is the Names app installed?), so names can't be looked up - use 0x addresses");
-                finish(problems);
-            });
-        });
+        if (names.length === 0) { finish(); return; }
+        // ask failed names again: the person may have linked their name since
+        var p = Object.assign({}, root.nameProblems); names.forEach(function (n) { delete p[n]; });
+        root.nameProblems = p; root.namesMissing = false; root.namesFor = names;
+        var gen = root.namesGen;
+        root.nameWaiters = root.nameWaiters.concat([function () { if (gen === root.namesGen) finish(); else cb({ cancelled: true }); }]);
+        askNames(names);
     }
     // Resolves the members-only list first when there is one; go(addrs) gets the
     // addresses, or undefined when there's nothing to resolve.
-    property int namesRun: 0
-    function endNamesRun() { var g = Object.assign({}, root.inFlight); delete g["resolveNames"]; root.inFlight = g; }
+    function endNamesRun() { root.namesFor = []; var g = Object.assign({}, root.inFlight); delete g["resolveNames"]; root.inFlight = g; }
     function withAllowList(go) {
         if (!root.draftRestrict || root.draftAnonymous) { go(undefined); return; }
         if (root.inFlight["resolveNames"]) return;
         var f = Object.assign({}, root.inFlight); f["resolveNames"] = true; root.inFlight = f;
-        var run = ++root.namesRun;
-        namesGuard.restart();
         resolveAllowList(root.draftAllowList, function (r) {
-            if (run !== root.namesRun) return;   // the guard already gave up on this one
-            namesGuard.stop(); endNamesRun();
+            endNamesRun();
+            if (r.cancelled) return;
             if (!r.ok) { toast(r.error); return; }
             go(r.addrs);
         });
     }
-    // Whatever the host does with the call's deadline, publishing is never left stuck.
-    Timer { id: namesGuard; interval: root.namesTimeoutMs + 1000
-            onTriggered: { root.namesRun++; root.endNamesRun(); root.toast("Names didn't answer (is the Names app installed?) - use 0x addresses"); } }
     property string linkName: ""
     readonly property string linkCommand: {
-        var n = nameOf(String(root.linkName || "").trim());
+        var n = nameOf(root.linkName || "");
         return n && root.myAddress ? "names set-text " + n + " " + root.nameAddressKey + " " + root.myAddress : "";
     }
     // Host results may arrive JSON-string-wrapped (once or twice) - peel, then parse.
@@ -591,6 +680,7 @@ Item {
         root.draftQuestions = [{ type: "text", text: "", required: true, optionsText: "" }];
         root.draftMax = ""; root.draftCloseAt = ""; root.draftShowCount = false; root.draftPublishAt = ""; root.draftScheduling = false;
         root.draftThankYou = ""; root.draftShuffle = false; root.draftAllowEdits = false; root.draftAnonymous = false; root.draftQuiz = false;
+        forgetNames();
     }
     function openCreate() { resetBuilder(); root.editingFormId = ""; rebuildBuilder(); root.draftDirty = false; root.showCreate = true; }
     // Edit a published form: same builder, existing questions keep their ids (answers are
@@ -2634,6 +2724,8 @@ Item {
                             }
                         }
                     }
+                    Text { textFormat: Text.PlainText; visible: root.draftRestrict && root.allowListStatus.text !== ""; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                        font.pixelSize: 11; color: root.allowListStatus.problem ? root.wbError : root.wbTextTert; text: root.allowListStatus.text }
                     SectionLabel { text: "LIMITS & TIMING (OPTIONAL)" }
                     RowLayout {
                         Layout.fillWidth: true
@@ -2733,8 +2825,8 @@ Item {
                 WbButton { label: "Preview"; onClicked: root.openPreview() }
                 WbButton { visible: !root.editingFormId; label: "Save draft"; onClicked: root.saveCurrentDraftNow() }
                 WbButton { visible: !root.editingFormId; label: root.draftScheduling ? "Don't schedule" : "Schedule..."; onClicked: root.draftScheduling = !root.draftScheduling }
-                WbButton { visible: !root.editingFormId; primary: true; label: root.busy("resolveNames") ? "Looking up names..." : root.busy("createForm") ? "Publishing..." : "Publish now"; active: !root.busy("createForm") && !root.busy("resolveNames"); onClicked: root.doCreate() }
-                WbButton { visible: !!root.editingFormId; primary: true; label: root.busy("resolveNames") ? "Looking up names..." : root.busy("updateForm") ? "Saving..." : "Save changes"; active: !root.busy("updateForm") && !root.busy("resolveNames"); onClicked: root.doUpdate() }
+                WbButton { visible: !root.editingFormId; primary: true; label: root.busy("resolveNames") ? "Looking up names " + root.namesProgress + "..." : root.busy("createForm") ? "Publishing..." : "Publish now"; active: !root.busy("createForm") && !root.busy("resolveNames"); onClicked: root.doCreate() }
+                WbButton { visible: !!root.editingFormId; primary: true; label: root.busy("resolveNames") ? "Looking up names " + root.namesProgress + "..." : root.busy("updateForm") ? "Saving..." : "Save changes"; active: !root.busy("updateForm") && !root.busy("resolveNames"); onClicked: root.doUpdate() }
             }
         }
     }
